@@ -127,11 +127,20 @@ func TestJWTAuthPolicy_ValidToken(t *testing.T) {
 		t.Errorf("Expected X-User-Name header to be 'John Doe', got %s", modifications.HeadersToSet["X-User-Name"])
 	}
 
-	// forwardToken defaults to true, so the Authorization header must NOT be stripped.
+	// forwardToken defaults to true and forwardedTokenHeader defaults to x-forwarded-authorization,
+	// so the token is renamed: Authorization is removed and x-forwarded-authorization is set.
+	foundRemoved := false
 	for _, h := range modifications.HeadersToRemove {
 		if strings.EqualFold(h, "Authorization") {
-			t.Errorf("Expected Authorization header to be forwarded by default, but it was in HeadersToRemove")
+			foundRemoved = true
+			break
 		}
+	}
+	if !foundRemoved {
+		t.Errorf("Expected Authorization header to be removed (renamed to x-forwarded-authorization), HeadersToRemove=%v", modifications.HeadersToRemove)
+	}
+	if modifications.HeadersToSet["X-Forwarded-Authorization"] == "" {
+		t.Errorf("Expected x-forwarded-authorization header to be set with token value, HeadersToSet=%v", modifications.HeadersToSet)
 	}
 }
 

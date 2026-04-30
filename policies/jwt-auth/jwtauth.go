@@ -1310,6 +1310,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	userIdClaim := getStringParam(params, "userIdClaim", "sub")
 	userAuthHeaderPrefix := getStringParam(params, "authHeaderPrefix", "")
 	forwardToken := getBoolParam(params, "forwardToken", true)
+	forwardedTokenHeader := getStringParam(params, "forwardedTokenHeader", "x-forwarded-authorization")
 
 	slog.Debug("JWT Auth Policy: User configuration loaded",
 		"issuers", userIssuers,
@@ -1456,12 +1457,12 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 
 	slog.Debug("JWT Auth Policy: All validations passed, authentication successful")
 
-	return p.handleAuthSuccessHeaders(reqCtx.SharedContext, claims, userClaimMappings, userIdClaim, headerName, forwardToken)
+	return p.handleAuthSuccessHeaders(reqCtx.SharedContext, claims, userClaimMappings, userIdClaim, headerName, authHeader, forwardToken, forwardedTokenHeader)
 }
 
 // handleAuthSuccessHeaders handles successful JWT authentication in the header phase.
 func (p *JwtAuthPolicy) handleAuthSuccessHeaders(shared *policy.SharedContext, claims jwt.MapClaims, claimMappings map[string]string,
-	userIdClaim string, headerName string, forwardToken bool) policy.RequestHeaderAction {
+	userIdClaim string, headerName string, authHeaderValue string, forwardToken bool, forwardedTokenHeader string) policy.RequestHeaderAction {
 	sub, _ := claims["sub"].(string)
 	iss, _ := claims["iss"].(string)
 
@@ -1489,12 +1490,22 @@ func (p *JwtAuthPolicy) handleAuthSuccessHeaders(shared *policy.SharedContext, c
 	modifications := policy.UpstreamRequestHeaderModifications{
 		HeadersToSet: make(map[string]string),
 	}
+
+	canonicalIn := http.CanonicalHeaderKey(headerName)
+	canonicalOut := http.CanonicalHeaderKey(forwardedTokenHeader)
+
 	if !forwardToken {
-		modifications.HeadersToRemove = []string{http.CanonicalHeaderKey(headerName)}
+		modifications.HeadersToRemove = []string{canonicalIn}
+	} else if canonicalOut != canonicalIn {
+		modifications.HeadersToSet[canonicalOut] = authHeaderValue
+		modifications.HeadersToRemove = []string{canonicalIn}
 	}
 
 	for claimName, headerName := range claimMappings {
 		if claimValue, ok := claims[claimName]; ok {
+			if forwardToken && http.CanonicalHeaderKey(headerName) == canonicalOut {
+				continue
+			}
 			modifications.HeadersToSet[headerName] = claimValueToString(claimValue)
 		}
 	}
