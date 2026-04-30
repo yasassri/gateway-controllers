@@ -104,9 +104,9 @@ def load_policy_module():
     src_dir = Path(__file__).resolve().parent.parent / "src"
     if str(src_dir) not in sys.path:
         sys.path.insert(0, str(src_dir))
-    sys.modules.pop("granite_guardian_prompt_injection_v1", None)
-    sys.modules.pop("granite_guardian_prompt_injection_v1.policy", None)
-    return importlib.import_module("granite_guardian_prompt_injection_v1.policy")
+    sys.modules.pop("granite_guardian_prompt_injection_v0", None)
+    sys.modules.pop("granite_guardian_prompt_injection_v0.policy", None)
+    return importlib.import_module("granite_guardian_prompt_injection_v0.policy")
 
 
 policy = load_policy_module()

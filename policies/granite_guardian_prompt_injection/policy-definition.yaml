@@ -1,5 +1,5 @@
 name: granite-guardian-prompt-injection
-version: v1.0.0
+version: v0.1.0
 displayName: Granite Guardian Prompt Injection
 description: |
   Detects prompt injection and jailbreak attempts in LLM requests using
