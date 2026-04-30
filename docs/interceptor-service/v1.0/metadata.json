@@ -4,7 +4,7 @@
   "version": "1.0",
   "provider": "WSO2",
   "categories": [
-    "Mediation",
+    "Transformation",
     "Extensibility"
   ],
   "description": "Invokes a user-defined HTTP interceptor service in the request and/or response phase. The interceptor can mutate headers, body, path, route to a dynamic endpoint, or short-circuit the chain with a direct response."

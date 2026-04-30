@@ -39,7 +39,7 @@ All available policies, sorted alphabetically.
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
 | [Dynamic Endpoint](./dynamic-endpoint/v1.0/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition at request time. |
 | [Host Rewrite](./host-rewrite/v1.0/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
-| [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Mediation, Extensibility | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
+| [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Transformation, Extensibility | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.0/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
 | [JSON/XML Mediator](./json-xml-mediator/v1.0/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
 | [JWT Auth](./jwt-auth/v1.0/docs/jwt-authentication.md) | Security, AI | Validates JWT access tokens using one or more JWKS providers (key managers). |
