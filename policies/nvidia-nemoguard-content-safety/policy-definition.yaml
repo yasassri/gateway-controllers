@@ -1,0 +1,386 @@
+name: nvidia-nemoguard-content-safety
+version: v0.1.0
+displayName: NeMo Guard Content Safety
+description: |
+  Validates request and/or response content using NVIDIA NeMo Guard (llama-3.1-nemoguard-8b-content-safety).
+  Request bodies are checked before they reach the upstream LLM; response bodies are checked before they are delivered
+  to the client. Unsafe requests are rejected with a configurable status code; unsafe responses are replaced with a
+  sanitised error message.
+
+  The model is a LoRA adapter on meta-llama/Llama-3.1-8B-Instruct served via
+  vLLM with --enable-lora. It classifies content into 23 safety categories:
+    S1 Violence, S2 Sexual, S3 Criminal Planning/Confessions,
+    S4 Guns and Illegal Weapons, S5 Controlled/Regulated Substances,
+    S6 Suicide and Self Harm, S7 Sexual (minor), S8 Hate/Identity Hate,
+    S9 PII/Privacy, S10 Harassment, S11 Threat, S12 Profanity,
+    S13 Needs Caution, S14 Other, S15 Manipulation, S16 Fraud/Deception,
+    S17 Malware, S18 High Risk Gov Decision Making,
+    S19 Political/Misinformation/Conspiracy,
+    S20 Copyright/Trademark/Plagiarism, S21 Unauthorized Advice,
+    S22 Illegal Activity, S23 Immoral/Unethical.
+
+parameters:
+  type: object
+  properties:
+    request:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: Configuration for request-phase content safety checks.
+      properties:
+        enabled:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Enables content safety checks on incoming requests.
+          default: true
+        jsonPath:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            JSONPath expression used to extract the user message from the
+            request body. Applies to JSON payloads only; non-JSON bodies are
+            passed through unchanged.
+          default: "$.messages[-1].content"
+        blockStatusCode:
+          type: integer
+          x-wso2-policy-advanced-param: false
+          description: |
+            HTTP status code returned when a request is blocked.
+          default: 400
+          minimum: 400
+          maximum: 599
+        categories:
+          type: object
+          x-wso2-policy-advanced-param: false
+          description: |
+            Toggle individual safety categories. Enabled categories (true)
+            block the request when detected. Disabled categories (false) are
+            passed through even if the model flags them. All categories are
+            blocked by default when this object is omitted.
+          properties:
+            violence:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S1 — Block violent content."
+              default: true
+            sexual:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S2 — Block sexual content."
+              default: true
+            criminal_planning:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S3 — Block criminal planning/confessions."
+              default: true
+            guns_weapons:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S4 — Block guns and illegal weapons content."
+              default: true
+            regulated_substances:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S5 — Block controlled/regulated substances content."
+              default: true
+            suicide_self_harm:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S6 — Block suicide and self-harm content."
+              default: true
+            sexual_minor:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S7 — Block sexual content involving minors."
+              default: true
+            hate_identity:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S8 — Block hate and identity-based hate content."
+              default: true
+            pii_privacy:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S9 — Block PII and privacy-violating content."
+              default: true
+            harassment:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S10 — Block harassment content."
+              default: true
+            threat:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S11 — Block threatening content."
+              default: true
+            profanity:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S12 — Block profanity."
+              default: true
+            needs_caution:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S13 — Block content that needs caution."
+              default: true
+            other:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S14 — Block other unsafe content."
+              default: true
+            manipulation:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S15 — Block manipulation content."
+              default: true
+            fraud_deception:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S16 — Block fraud and deception content."
+              default: true
+            malware:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S17 — Block malware-related content."
+              default: true
+            high_risk_gov:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S18 — Block high risk government decision-making content."
+              default: true
+            misinformation:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S19 — Block political/misinformation/conspiracy content."
+              default: true
+            copyright:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S20 — Block copyright/trademark/plagiarism content."
+              default: true
+            unauthorized_advice:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S21 — Block unauthorized professional advice."
+              default: true
+            illegal_activity:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S22 — Block illegal activity content."
+              default: true
+            immoral_unethical:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S23 — Block immoral/unethical content."
+              default: true
+        passthroughOnError:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            When true, allows the request to proceed if the NeMo Guard API
+            call fails (fail-open). When false (default), a 503 is returned
+            on API errors (fail-closed).
+          default: false
+        showAssessment:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            When true, includes the detected safety categories in the
+            blocked-request error response body.
+          default: false
+    response:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: Configuration for response-phase content safety checks.
+      properties:
+        enabled:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Enables content safety checks on upstream responses before they
+            are delivered to the client.
+          default: false
+        jsonPath:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            JSONPath expression used to extract the assistant reply from the
+            response body.
+          default: "$.choices[0].message.content"
+        categories:
+          type: object
+          x-wso2-policy-advanced-param: false
+          description: |
+            Toggle individual safety categories for response-phase checks.
+            Same semantics as the request-phase categories object.
+          properties:
+            violence:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S1 — Block violent content."
+              default: true
+            sexual:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S2 — Block sexual content."
+              default: true
+            criminal_planning:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S3 — Block criminal planning/confessions."
+              default: true
+            guns_weapons:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S4 — Block guns and illegal weapons content."
+              default: true
+            regulated_substances:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S5 — Block controlled/regulated substances content."
+              default: true
+            suicide_self_harm:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S6 — Block suicide and self-harm content."
+              default: true
+            sexual_minor:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S7 — Block sexual content involving minors."
+              default: true
+            hate_identity:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S8 — Block hate and identity-based hate content."
+              default: true
+            pii_privacy:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S9 — Block PII and privacy-violating content."
+              default: true
+            harassment:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S10 — Block harassment content."
+              default: true
+            threat:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S11 — Block threatening content."
+              default: true
+            profanity:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S12 — Block profanity."
+              default: true
+            needs_caution:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S13 — Block content that needs caution."
+              default: true
+            other:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S14 — Block other unsafe content."
+              default: true
+            manipulation:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S15 — Block manipulation content."
+              default: true
+            fraud_deception:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S16 — Block fraud and deception content."
+              default: true
+            malware:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S17 — Block malware-related content."
+              default: true
+            high_risk_gov:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S18 — Block high risk government decision-making content."
+              default: true
+            misinformation:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S19 — Block political/misinformation/conspiracy content."
+              default: true
+            copyright:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S20 — Block copyright/trademark/plagiarism content."
+              default: true
+            unauthorized_advice:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S21 — Block unauthorized professional advice."
+              default: true
+            illegal_activity:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S22 — Block illegal activity content."
+              default: true
+            immoral_unethical:
+              type: boolean
+              x-wso2-policy-advanced-param: false
+              description: "S23 — Block immoral/unethical content."
+              default: true
+        passthroughOnError:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            When true, allows the response to proceed if the NeMo Guard API
+            call fails (fail-open). When false (default), a 503 is returned
+            on API errors (fail-closed).
+          default: false
+        showAssessment:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            When true, includes the detected safety categories in the
+            replaced-response error body.
+          default: false
+  anyOf:
+    - required: [request]
+    - required: [response]
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    endpoint:
+      type: string
+      format: uri
+      description: |
+        Base URL of the OpenAI-compatible inference endpoint serving the
+        NeMo Guard model (e.g., http://nemoguard:8101). The policy appends
+        /v1/chat/completions automatically.
+      minLength: 1
+      "wso2/defaultValue": "${config.nemoguard_endpoint}"
+    apiKey:
+      type: string
+      description: |
+        Bearer token used to authenticate with the inference endpoint.
+        Leave empty if the endpoint does not require authentication.
+      "wso2/defaultValue": "${config.nemoguard_api_key}"
+    model:
+      type: string
+      description: |
+        Model identifier forwarded in the API request. Must match the
+        --lora-modules alias used when serving via vLLM (default: nemoguard).
+      default: "nemoguard"
+      "wso2/defaultValue": "${config.nemoguard_model}"
+    timeout:
+      type: integer
+      description: |
+        Per-request timeout in seconds for calls to the NeMo Guard endpoint.
+      default: 30
+      minimum: 1
+      maximum: 120
+      "wso2/defaultValue": "${config.nemoguard_timeout}"
+  required:
+    - endpoint
