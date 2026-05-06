@@ -1,0 +1,118 @@
+name: granite-guardian-prompt-injection
+version: v0.1.0
+displayName: Granite Guardian Prompt Injection
+description: |
+  Detects prompt injection and jailbreak attempts in LLM requests using
+  IBM Granite Guardian 3.3 8B. The request body is buffered and the latest
+  user message is extracted via a configurable JSONPath expression. The text
+  is forwarded to a Granite Guardian endpoint, which classifies it against
+  one or more risk categories. Requests flagged as risky are rejected before
+  reaching the upstream LLM.
+
+parameters:
+  type: object
+  properties:
+    jsonPath:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        JSONPath expression used to extract the user message from the request
+        body. Applies to JSON payloads only; non-JSON bodies are passed through
+        unchanged.
+      default: "$.messages[-1].content"
+    riskNames:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        List of Granite Guardian risk categories to evaluate. The request is
+        blocked if any category returns a positive verdict. Supported values:
+        jailbreak, prompt_injection, violence, sexual_content, profanity,
+        unethical_behavior.
+      minItems: 1
+      items:
+        type: string
+        enum:
+          - jailbreak
+          - prompt_injection
+          - violence
+          - sexual_content
+          - profanity
+          - unethical_behavior
+      default:
+        - jailbreak
+        - prompt_injection
+    blockStatusCode:
+      type: integer
+      x-wso2-policy-advanced-param: false
+      description: |
+        HTTP status code returned to the client when a request is blocked.
+      default: 400
+      minimum: 400
+      maximum: 599
+    threshold:
+      type: number
+      x-wso2-policy-advanced-param: false
+      description: |
+        Minimum model confidence (0.0–1.0) required to block a request.
+        Granite Guardian returns a log-probability for its verdict token;
+        this is converted to a probability and compared against the threshold.
+        Increase the value to reduce false positives — a request is only
+        blocked when the model's confidence meets or exceeds this level.
+        Set to 0.0 to block on any positive verdict regardless of confidence.
+      default: 0.5
+      minimum: 0.0
+      maximum: 1.0
+    passthroughOnError:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: |
+        When true, allows the request to proceed if the Granite Guardian
+        API call fails (fail-open). When false (default), a 503 is returned
+        on API errors (fail-closed).
+      default: false
+    showAssessment:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: |
+        When true, includes the risk name and raw model verdict in the
+        blocked-request error response body.
+      default: false
+  required: []
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    endpoint:
+      type: string
+      format: uri
+      description: |
+        Base URL of the OpenAI-compatible inference endpoint serving the
+        Granite Guardian model (e.g., http://granite-guardian:8000). The
+        policy appends /v1/chat/completions automatically.
+      minLength: 1
+      "wso2/defaultValue": "${config.granite_guardian_endpoint}"
+    apiKey:
+      type: string
+      description: |
+        Bearer token used to authenticate with the inference endpoint.
+        Leave empty if the endpoint does not require authentication.
+      "wso2/defaultValue": "${config.granite_guardian_api_key}"
+    model:
+      type: string
+      description: |
+        Model identifier forwarded in the API request. Override only when
+        the serving endpoint uses a different name for the model.
+      default: "ibm-granite/granite-guardian-3.3-8b"
+      "wso2/defaultValue": "${config.granite_guardian_model}"
+    timeout:
+      type: integer
+      description: |
+        Per-request timeout in seconds for calls to the Granite Guardian
+        endpoint.
+      default: 10
+      minimum: 1
+      maximum: 60
+      "wso2/defaultValue": "${config.granite_guardian_timeout}"
+  required:
+    - endpoint

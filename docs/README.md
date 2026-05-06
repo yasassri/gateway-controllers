@@ -38,6 +38,7 @@ All available policies, sorted alphabetically.
 | [Content Length Guardrail](./content-length-guardrail/v1.0/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
 | [Dynamic Endpoint](./dynamic-endpoint/v1.0/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition at request time. |
+| [Granite Guardian Prompt Injection](./granite-guardian-prompt-injection/v0.1/docs/granite-guardian-prompt-injection.md) | Guardrails, AI | Detects prompt injection and jailbreak attempts in LLM API requests using IBM Granite Guardian 3.3 8B. |
 | [Host Rewrite](./host-rewrite/v1.0/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
 | [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.0/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
