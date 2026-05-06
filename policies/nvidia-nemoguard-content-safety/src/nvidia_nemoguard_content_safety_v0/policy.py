@@ -196,8 +196,10 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
             )
 
         if unsafe:
-            if req_params.request.blocked_codes is not None and not any(
-                c in req_params.request.blocked_codes for c in category_codes
+            if (
+                req_params.request.blocked_codes is not None
+                and category_codes
+                and not any(c in req_params.request.blocked_codes for c in category_codes)
             ):
                 return _PASSTHROUGH_REQUEST
             msg: dict = {
