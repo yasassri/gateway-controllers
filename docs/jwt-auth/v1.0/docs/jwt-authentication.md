@@ -18,7 +18,7 @@ The JWT Authentication policy validates JWT access tokens using one or more JWKS
 - Authorization header scheme enforcement and clock skew tolerance
 - Customizable error responses
 - Optional `userIdClaim` mapping for analytics
-- Optional forwarding of the original `Authorization` header (JWT) to the upstream
+- Optional forwarding of the JWT to the upstream under a configurable header name
 
 ## Configuration
 
@@ -103,7 +103,8 @@ skipTlsVerify = false
 | `authHeaderPrefix` | string | No | Overrides the configured authorization header scheme for this route. |
 | `headerName` | string | No | Header name to extract the token from (e.g., `"Authorization"`). Overrides `system.headerName`. Must be a valid HTTP header field name (non-empty, no spaces or control characters). |
 | `userIdClaim` | string | No | Claim name to extract user ID for analytics. Defaults to `sub`. |
-| `forwardToken` | boolean | No | If `true` (default), the original `Authorization` header (containing the JWT) is forwarded to the upstream after successful validation. Set to `false` to strip the header before proxying. |
+| `forwardToken` | boolean | No | If `true` (default), the JWT is forwarded to the upstream after successful validation. Set to `false` to strip the token header before proxying. |
+| `forwardedTokenHeader` | string | No | Header name used to forward the JWT to the upstream when `forwardToken` is `true`. Defaults to `x-forwarded-authorization`. If this differs from `headerName`, the original header is removed and the token is forwarded under this name instead. Has no effect when `forwardToken` is `false`. |
 
 
 **Note:**
@@ -260,7 +261,7 @@ spec:
 
 ### Example 6: Strip JWT Before Forwarding to Upstream
 
-By default, the original `Authorization` header is forwarded to the upstream after successful validation. Set `forwardToken: false` to strip it before proxying.
+By default, the JWT is forwarded to the upstream after successful validation under the `x-forwarded-authorization` header. Set `forwardToken: false` to strip it before proxying.
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
@@ -284,4 +285,33 @@ spec:
             issuers:
               - PrimaryIDP
             forwardToken: false
+```
+
+### Example 7: Forward JWT Under a Custom Header
+
+When `forwardToken` is `true` (the default), the validated JWT is forwarded to the upstream under the header named by `forwardedTokenHeader` (default `x-forwarded-authorization`). Use this to preserve the incoming `Authorization` header for other purposes, or to hand the token to a backend that expects a specific header name.
+
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: RestApi
+metadata:
+  name: jwt-auth-forwarded-header-api
+spec:
+  displayName: JWT Auth Forwarded Header API
+  version: v1.0
+  context: /jwt-auth-forwarded/$version
+  upstream:
+    main:
+      url: http://sample-backend:9080/api/v1
+  operations:
+    - method: GET
+      path: /protected
+      policies:
+        - name: jwt-auth
+          version: v1
+          params:
+            issuers:
+              - PrimaryIDP
+            forwardToken: true
+            forwardedTokenHeader: X-Backend-Authorization
 ```
