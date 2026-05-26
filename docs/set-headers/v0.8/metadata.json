@@ -6,7 +6,8 @@
   "categories": [
     "Transformation",
     "MCP",
-    "WebSub"
+    "WebSub",
+    "WebBroker"
   ],
   "description": "This policy provides the capability to set arbitrary headers to either the request or the response.\nSetting the same header multiple times will overwrite the existing header value."
 }

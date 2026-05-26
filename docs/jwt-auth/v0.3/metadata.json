@@ -6,7 +6,8 @@
   "categories": [
     "Security",
     "AI",
-    "WebSub"
+    "WebSub",
+    "WebBroker"
   ],
   "description": "Validates JWT access tokens included in API requests. The gateway verifies the token's signature, expiry, issuer, audience, scopes, and required claims."
 }

@@ -6,7 +6,8 @@
   "categories": [
     "Security",
     "AI",
-    "WebSub"
+    "WebSub",
+    "WebBroker"
   ],
   "description": "Implements HTTP Basic Authentication to protect APIs with username and password credentials.\nValidates the Authorization header against configured credentials and sets authentication\nmetadata in the request context for downstream policies to use."
 }

@@ -6,7 +6,8 @@
   "categories": [
     "Transformation",
     "MCP",
-    "WebSub"
+    "WebSub",
+    "WebBroker"
   ],
   "description": "This policy provides the capability to remove headers from either the request or the response.\nHeader removal is performed by header name matching (case-insensitive). If a header does not exist, the removal operation is ignored without error."
 }
