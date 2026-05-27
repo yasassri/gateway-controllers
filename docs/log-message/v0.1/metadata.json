@@ -6,7 +6,8 @@
   "categories": [
     "Logging",
     "Analytics & Monitoring",
-    "WebSub"
+    "WebSub",
+    "WebBroker"
   ],
   "description": "This policy provides the capability to log the payload and headers of a request/response.\nIt supports separate configuration for request and response flows."
 }

@@ -5,7 +5,8 @@
   "provider": "WSO2",
   "categories": [
     "Transformation",
-    "WebSub"
+    "WebSub",
+    "WebBroker"
   ],
   "description": "Sets configured headers on requests and/or responses. If the same header is set multiple times, the latest configured value overwrites earlier values."
 }

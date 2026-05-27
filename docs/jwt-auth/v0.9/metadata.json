@@ -6,7 +6,8 @@
   "categories": [
     "Security",
     "AI",
-    "WebSub"
+    "WebSub",
+    "WebBroker"
   ],
   "description": "Validates JWT access tokens using one or more JWKS providers (key managers).\nSystem-level configuration holds key manager endpoints and fetch behavior.\nUser-level configuration holds per-route assertions (selected issuers, audiences, scopes, claims and mappings)."
 }
