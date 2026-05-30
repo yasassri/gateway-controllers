@@ -217,6 +217,9 @@ func (p *McpRateLimitPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.R
 	}
 
 	if len(invoked) > 0 {
+		if reqCtx.SharedContext.Metadata == nil {
+			reqCtx.SharedContext.Metadata = make(map[string]any)
+		}
 		reqCtx.SharedContext.Metadata[metadataInvokedDelegates] = invoked
 	}
 

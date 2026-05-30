@@ -20,7 +20,7 @@ parameters:
       type: array
       x-wso2-policy-advanced-param: false
       description: |
-        Rate-limit rules for MCP tools. Each entry targets a tool by name``
+        Rate-limit rules for MCP tools. Each entry targets a tool by name
         (or "*") and applies one or more limits. Exact names take precedence
         over wildcards; all matching entries are enforced (strictest wins).
       minItems: 1
@@ -63,7 +63,7 @@ parameters:
                     Limit window as a Go duration string. Supports units
                     ns, us, µs, ms, s, m, h, including composite and fractional
                     values (for example "500ms", "1.5s", "1m30s", "24h").
-                  pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+                  pattern: "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
           keyExtraction:
             type: array
             x-wso2-policy-advanced-param: true
@@ -162,7 +162,7 @@ parameters:
                     Limit window as a Go duration string. Supports units
                     ns, us, µs, ms, s, m, h, including composite and fractional
                     values (for example "500ms", "1.5s", "1m30s", "24h").
-                  pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+                  pattern: "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
           keyExtraction:
             type: array
             x-wso2-policy-advanced-param: true
@@ -261,7 +261,7 @@ parameters:
                     Limit window as a Go duration string. Supports units
                     ns, us, µs, ms, s, m, h, including composite and fractional
                     values (for example "500ms", "1.5s", "1m30s", "24h").
-                  pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+                  pattern: "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
           keyExtraction:
             type: array
             x-wso2-policy-advanced-param: true
@@ -361,7 +361,7 @@ parameters:
                     Limit window as a Go duration string. Supports units
                     ns, us, µs, ms, s, m, h, including composite and fractional
                     values (for example "500ms", "1.5s", "1m30s", "24h").
-                  pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+                  pattern: "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
           keyExtraction:
             type: array
             x-wso2-policy-advanced-param: true
