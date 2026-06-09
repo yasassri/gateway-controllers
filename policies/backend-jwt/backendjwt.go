@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,23 @@ const (
 	defaultHeader      = "x-jwt-assertion"
 	defaultTokenExpiry = 15 * time.Minute
 	defaultAlgorithm   = "RS256"
+	minCacheTTL        = 30 * time.Second
 )
+
+// cachedToken holds a signed JWT string and its cache expiry time.
+type cachedToken struct {
+	signed    string
+	expiresAt time.Time
+}
+
+// resolvedClaims holds the extra claims derived from claimMappings and customClaims
+// in a single pass, split by type so cache-key and JWT population can share the work.
+type resolvedClaims struct {
+	// stringClaims: claimMappings results + resolved string customClaims (including $ctx:).
+	stringClaims map[string]string
+	// rawClaims: non-string customClaims (numbers, booleans) preserved as-is for JWT.
+	rawClaims map[string]interface{}
+}
 
 // BackendJWTPolicy generates a signed JWT from the authenticated user context
 // and injects it into the upstream request header. It is designed to run after
@@ -48,14 +65,44 @@ const (
 type BackendJWTPolicy struct {
 	keyMu    sync.RWMutex
 	keyCache map[[32]byte]crypto.PrivateKey
+
+	tokenMu    sync.RWMutex
+	tokenCache map[string]cachedToken
 }
 
 var ins = &BackendJWTPolicy{
-	keyCache: make(map[[32]byte]crypto.PrivateKey),
+	keyCache:   make(map[[32]byte]crypto.PrivateKey),
+	tokenCache: make(map[string]cachedToken),
+}
+
+var startCleanup sync.Once
+
+func startCacheCleanupOnce() {
+	startCleanup.Do(func() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				ins.evictExpired()
+			}
+		}()
+	})
+}
+
+func (p *BackendJWTPolicy) evictExpired() {
+	now := time.Now()
+	p.tokenMu.Lock()
+	for k, v := range p.tokenCache {
+		if now.After(v.expiresAt) {
+			delete(p.tokenCache, k)
+		}
+	}
+	p.tokenMu.Unlock()
 }
 
 // GetPolicy is the v1alpha2 factory entry point.
 func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
+	startCacheCleanupOnce()
 	return ins, nil
 }
 
@@ -98,6 +145,25 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		return policy.UpstreamRequestHeaderModifications{}
 	}
 
+	algorithm := getString(params, "algorithm", defaultAlgorithm)
+	issuer := getString(params, "issuer", "")
+	expiry := parseDuration(getString(params, "tokenExpiry", ""), defaultTokenExpiry)
+	headerName := getString(params, "header", defaultHeader)
+
+	// Resolve extra claims once — used for both the cache key and JWT population.
+	extras := resolveExtraClaims(authCtx, reqCtx, params)
+
+	cacheKey := buildTokenCacheKey(
+		authCtx.Subject, authCtx.CredentialID, authCtx.AuthType, authCtx.Issuer,
+		reqCtx.OperationPath, issuer, algorithm, extras,
+	)
+	if signed, ok := p.getCachedToken(cacheKey); ok {
+		slog.Debug("Backend JWT: cache hit", "subject", authCtx.Subject)
+		return policy.UpstreamRequestHeaderModifications{
+			HeadersToSet: map[string]string{headerName: signed},
+		}
+	}
+
 	pemBytes, err := extractSigningKeyPEM(params)
 	if err != nil {
 		slog.Error("Backend JWT: failed to extract signing key", "error", err)
@@ -110,15 +176,11 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		return internalError()
 	}
 
-	algorithm := getString(params, "algorithm", defaultAlgorithm)
 	signingMethod, err := getSigningMethod(algorithm, privateKey)
 	if err != nil {
 		slog.Error("Backend JWT: unsupported algorithm or mismatched key type", "algorithm", algorithm, "error", err)
 		return internalError()
 	}
-
-	issuer := getString(params, "issuer", "")
-	expiry := parseDuration(getString(params, "tokenExpiry", ""), defaultTokenExpiry)
 
 	now := time.Now()
 	claims := jwt.MapClaims{
@@ -139,41 +201,11 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	if authCtx.CredentialID != "" {
 		claims["credential_id"] = authCtx.CredentialID
 	}
-
-	// Map selected AuthContext.Properties keys to JWT claims.
-	if mappingsRaw, ok := params["claimMappings"]; ok {
-		if mappings, ok := mappingsRaw.(map[string]interface{}); ok {
-			for propKey, claimNameRaw := range mappings {
-				claimName, ok := claimNameRaw.(string)
-				if !ok {
-					continue
-				}
-				if val, ok := authCtx.Properties[propKey]; ok {
-					claims[claimName] = val
-				}
-			}
-		}
+	for k, v := range extras.stringClaims {
+		claims[k] = v
 	}
-
-	// Apply custom claims — string values starting with "$ctx:" resolve from request context.
-	if customRaw, ok := params["customClaims"]; ok {
-		if custom, ok := customRaw.(map[string]interface{}); ok {
-			for k, v := range custom {
-				strVal, ok := v.(string)
-				if !ok {
-					// Non-string values (numbers, booleans) pass through as-is.
-					claims[k] = v
-					continue
-				}
-				resolved, ok := resolveClaimValue(strVal, reqCtx)
-				if !ok {
-					slog.Debug("Backend JWT: skipping claim — context variable not resolvable",
-						"claim", k, "ref", strVal)
-					continue
-				}
-				claims[k] = resolved
-			}
-		}
+	for k, v := range extras.rawClaims {
+		claims[k] = v
 	}
 
 	token := jwt.NewWithClaims(signingMethod, claims)
@@ -183,7 +215,7 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		return internalError()
 	}
 
-	headerName := getString(params, "header", defaultHeader)
+	p.putCachedToken(cacheKey, signed, expiry)
 	slog.Debug("Backend JWT: generated token", "header", headerName, "subject", authCtx.Subject)
 
 	return policy.UpstreamRequestHeaderModifications{
@@ -214,6 +246,121 @@ func (p *BackendJWTPolicy) loadKey(pemBytes []byte) (crypto.PrivateKey, error) {
 	p.keyMu.Unlock()
 
 	return parsed, nil
+}
+
+// resolveExtraClaims resolves claimMappings and customClaims in a single pass.
+// stringClaims holds claimMappings results and resolved string customClaims (including $ctx: refs).
+// rawClaims holds non-string customClaims preserved as their original types for JWT population.
+func resolveExtraClaims(authCtx *policy.AuthContext, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) resolvedClaims {
+	result := resolvedClaims{
+		stringClaims: make(map[string]string),
+		rawClaims:    make(map[string]interface{}),
+	}
+
+	if mappingsRaw, ok := params["claimMappings"]; ok {
+		if mappings, ok := mappingsRaw.(map[string]interface{}); ok {
+			for propKey, claimNameRaw := range mappings {
+				claimName, ok := claimNameRaw.(string)
+				if !ok {
+					continue
+				}
+				if val, ok := authCtx.Properties[propKey]; ok {
+					result.stringClaims[claimName] = val
+				}
+			}
+		}
+	}
+
+	if customRaw, ok := params["customClaims"]; ok {
+		if custom, ok := customRaw.(map[string]interface{}); ok {
+			for k, v := range custom {
+				strVal, ok := v.(string)
+				if !ok {
+					result.rawClaims[k] = v
+					continue
+				}
+				resolved, ok := resolveClaimValue(strVal, reqCtx)
+				if !ok {
+					slog.Debug("Backend JWT: skipping claim — context variable not resolvable",
+						"claim", k, "ref", strVal)
+					continue
+				}
+				result.stringClaims[k] = resolved
+			}
+		}
+	}
+
+	return result
+}
+
+// buildTokenCacheKey returns a hex SHA256 of all fields that determine what the generated JWT contains.
+// resolvedClaims are sorted so the key is deterministic regardless of map iteration order.
+func buildTokenCacheKey(subject, credentialID, authType, originalIssuer, operationPath, issuer, algorithm string, extras resolvedClaims) string {
+	// Collect all extra claim keys, merging both maps.
+	allKeys := make([]string, 0, len(extras.stringClaims)+len(extras.rawClaims))
+	for k := range extras.stringClaims {
+		allKeys = append(allKeys, k)
+	}
+	for k := range extras.rawClaims {
+		if _, exists := extras.stringClaims[k]; !exists {
+			allKeys = append(allKeys, k)
+		}
+	}
+	sort.Strings(allKeys)
+
+	var sb strings.Builder
+	sb.WriteString(subject)
+	sb.WriteByte('|')
+	sb.WriteString(credentialID)
+	sb.WriteByte('|')
+	sb.WriteString(authType)
+	sb.WriteByte('|')
+	sb.WriteString(originalIssuer)
+	sb.WriteByte('|')
+	sb.WriteString(operationPath)
+	sb.WriteByte('|')
+	sb.WriteString(issuer)
+	sb.WriteByte('|')
+	sb.WriteString(algorithm)
+	for _, k := range allKeys {
+		sb.WriteByte('|')
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		if v, ok := extras.stringClaims[k]; ok {
+			sb.WriteString(v)
+		} else {
+			sb.WriteString(fmt.Sprintf("%v", extras.rawClaims[k]))
+		}
+	}
+	sum := sha256.Sum256([]byte(sb.String()))
+	return fmt.Sprintf("%x", sum)
+}
+
+// getCachedToken returns a previously signed token if it exists and has not yet expired.
+func (p *BackendJWTPolicy) getCachedToken(key string) (string, bool) {
+	p.tokenMu.RLock()
+	entry, ok := p.tokenCache[key]
+	p.tokenMu.RUnlock()
+	if !ok || time.Now().After(entry.expiresAt) {
+		return "", false
+	}
+	return entry.signed, true
+}
+
+// putCachedToken stores a signed token in the cache with a TTL of half the token expiry,
+// subject to a minimum of minCacheTTL. Using half the expiry avoids serving tokens that
+// are about to expire while still providing a meaningful cache window.
+func (p *BackendJWTPolicy) putCachedToken(key, signed string, tokenExpiry time.Duration) {
+	ttl := tokenExpiry / 2
+	if ttl < minCacheTTL {
+		ttl = minCacheTTL
+	}
+	p.tokenMu.Lock()
+	p.tokenCache[key] = cachedToken{
+		signed:    signed,
+		expiresAt: time.Now().Add(ttl),
+	}
+	p.tokenMu.Unlock()
 }
 
 // extractSigningKeyPEM reads PEM bytes from params["signingKey"].inline or params["signingKey"].path.

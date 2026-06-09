@@ -11,6 +11,8 @@ Backend services can verify the generated JWT using the gateway's corresponding 
 3. The signed JWT is set as the value of the configured upstream header (default: `x-jwt-assertion`).
 4. The upstream service verifies the JWT using the matching public key.
 
+Generated tokens are cached in memory for half their configured `tokenExpiry` (minimum 30 seconds). The cache key is derived from the authenticated client identity, API operation path, and all resolved claim values. Requests from the same client hitting the same operation within the cache window receive the previously signed token, avoiding repeated cryptographic operations. Dynamic custom claims that differ between requests (e.g. `$ctx:request.header.*`) produce separate cache entries, preserving correctness.
+
 If no authentication context is present:
 - With `requireAuthentication: false` (default) — the request is forwarded without a backend JWT.
 - With `requireAuthentication: true` — the request is rejected with `401 Unauthorized`.
