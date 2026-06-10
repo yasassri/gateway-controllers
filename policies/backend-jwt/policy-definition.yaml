@@ -73,7 +73,7 @@ systemParameters:
       type: string
       description: >-
         JWT signing algorithm. Must match the type of the configured private key:
-        RS256/RS384/RS512 for RSA keys, ES256/ES384/ES512 for ECDSA keys.
+        SHA256withRSA for RSA keys, ES256 for ECDSA keys, or NONE for unsigned tokens.
       default: SHA256withRSA
       "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.algorithm}"
       enum: ["SHA256withRSA", "ES256", "NONE"]

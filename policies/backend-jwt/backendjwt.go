@@ -63,6 +63,7 @@ type resolvedClaims struct {
 type BackendJWTPolicy struct {
 	keyMu    sync.RWMutex
 	keyCache map[[32]byte]crypto.PrivateKey
+	pemCache map[string][]byte // path → PEM bytes; avoids repeated file reads per cache miss
 
 	tokenMu    sync.RWMutex
 	tokenCache map[string]cachedToken
@@ -84,6 +85,7 @@ var algorithms = map[string]algorithmEntry{
 
 var ins = &BackendJWTPolicy{
 	keyCache:   make(map[[32]byte]crypto.PrivateKey),
+	pemCache:   make(map[string][]byte),
 	tokenCache: make(map[string]cachedToken),
 }
 
@@ -138,7 +140,7 @@ func (p *BackendJWTPolicy) Validate(params map[string]interface{}) error {
 	if entry.keyType == "none" {
 		return nil
 	}
-	pemBytes, err := extractSigningKeyPEM(params)
+	pemBytes, err := p.extractSigningKeyPEM(params)
 	if err != nil {
 		return fmt.Errorf("invalid signingKey: %w", err)
 	}
@@ -196,7 +198,7 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	if entry.keyType == "none" {
 		signKey = jwt.UnsafeAllowNoneSignatureType
 	} else {
-		pemBytes, err := extractSigningKeyPEM(params)
+		pemBytes, err := p.extractSigningKeyPEM(params)
 		if err != nil {
 			slog.Error("Backend JWT: failed to extract signing key", "error", err)
 			return internalError()
@@ -392,7 +394,9 @@ func (p *BackendJWTPolicy) putCachedToken(key, signed string, tokenExpiry time.D
 }
 
 // extractSigningKeyPEM reads PEM bytes from params["signingKey"].inline or params["signingKey"].path.
-func extractSigningKeyPEM(params map[string]interface{}) ([]byte, error) {
+// Path-based keys are cached after the first read so that token cache misses under high load do not
+// repeatedly hit the filesystem. Key rotation requires a gateway restart.
+func (p *BackendJWTPolicy) extractSigningKeyPEM(params map[string]interface{}) ([]byte, error) {
 	signingKeyRaw, ok := params["signingKey"]
 	if !ok {
 		return nil, fmt.Errorf("signingKey is required")
@@ -415,10 +419,23 @@ func extractSigningKeyPEM(params map[string]interface{}) ([]byte, error) {
 		if !ok || path == "" {
 			return nil, fmt.Errorf("signingKey.path must be a non-empty string")
 		}
+
+		p.keyMu.RLock()
+		cached, ok := p.pemCache[path]
+		p.keyMu.RUnlock()
+		if ok {
+			return cached, nil
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("reading key file %q: %w", path, err)
 		}
+
+		p.keyMu.Lock()
+		p.pemCache[path] = data
+		p.keyMu.Unlock()
+
 		return data, nil
 	}
 

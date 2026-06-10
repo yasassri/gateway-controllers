@@ -120,7 +120,7 @@ func TestGetPolicySingleton(t *testing.T) {
 }
 
 func TestMode(t *testing.T) {
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	mode := p.Mode()
 	if mode.RequestHeaderMode != policy.HeaderModeProcess {
 		t.Errorf("expected RequestHeaderMode=HeaderModeProcess, got %v", mode.RequestHeaderMode)
@@ -138,7 +138,7 @@ func TestMode(t *testing.T) {
 
 func TestNoAuthContext_RequireAuth(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["requireAuthentication"] = true
 
@@ -156,7 +156,7 @@ func TestNoAuthContext_RequireAuth(t *testing.T) {
 
 func TestNoAuthContext_NoRequireAuth(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 
 	reqCtx := newRequestContext(nil)
@@ -173,7 +173,7 @@ func TestNoAuthContext_NoRequireAuth(t *testing.T) {
 
 func TestUnauthenticatedAuthContext_RequireAuth(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["requireAuthentication"] = true
 
@@ -191,7 +191,7 @@ func TestUnauthenticatedAuthContext_RequireAuth(t *testing.T) {
 
 func TestGeneratesJWTWithSubject(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 
 	reqCtx := newRequestContext(&policy.AuthContext{
@@ -229,7 +229,7 @@ func TestGeneratesJWTWithSubject(t *testing.T) {
 
 func TestCustomClaims(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{
 		"env":     "production",
@@ -257,7 +257,7 @@ func TestCustomClaims(t *testing.T) {
 
 func TestTokenExpiry(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["tokenExpiry"] = "5m"
 
@@ -292,7 +292,7 @@ func TestTokenExpiry(t *testing.T) {
 
 func TestSHA256withRSASigning(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 
 	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "rsa-user"})
@@ -317,7 +317,7 @@ func TestSHA256withRSASigning(t *testing.T) {
 
 func TestES256Signing(t *testing.T) {
 	ecKey, keyPEM := generateECKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"signingKey": map[string]interface{}{"inline": keyPEM},
 		"algorithm":  "ES256",
@@ -344,7 +344,7 @@ func TestES256Signing(t *testing.T) {
 
 func TestMismatchedAlgorithmAndKey(t *testing.T) {
 	_, ecKeyPEM := generateECKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"signingKey": map[string]interface{}{"inline": ecKeyPEM},
 		"algorithm":  "SHA256withRSA", // EC key with RSA algorithm
@@ -364,7 +364,7 @@ func TestMismatchedAlgorithmAndKey(t *testing.T) {
 
 func TestCustomHeader(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["header"] = "x-custom-backend-token"
 
@@ -381,7 +381,7 @@ func TestCustomHeader(t *testing.T) {
 }
 
 func TestInvalidPrivateKey(t *testing.T) {
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"signingKey": map[string]interface{}{
 			"inline": "not-a-valid-pem-key",
@@ -403,7 +403,7 @@ func TestInvalidPrivateKey(t *testing.T) {
 
 
 func TestValidate_MissingKey(t *testing.T) {
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	err := p.Validate(map[string]interface{}{})
 	if err == nil {
 		t.Error("Validate must return error when signingKey is absent")
@@ -411,7 +411,7 @@ func TestValidate_MissingKey(t *testing.T) {
 }
 
 func TestValidate_InvalidKeyMaterial(t *testing.T) {
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	err := p.Validate(map[string]interface{}{
 		"signingKey": map[string]interface{}{
 			"inline": "-----BEGIN RSA PRIVATE KEY-----\nbaddata\n-----END RSA PRIVATE KEY-----",
@@ -424,7 +424,7 @@ func TestValidate_InvalidKeyMaterial(t *testing.T) {
 
 func TestValidate_ValidKey(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	err := p.Validate(map[string]interface{}{
 		"signingKey": map[string]interface{}{"inline": keyPEM},
 	})
@@ -445,7 +445,7 @@ func TestKeyFilePath(t *testing.T) {
 	}
 	f.Close()
 
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"signingKey": map[string]interface{}{"path": f.Name()},
 		"algorithm":  "SHA256withRSA",
@@ -461,9 +461,47 @@ func TestKeyFilePath(t *testing.T) {
 	decodeJWT(t, mods.HeadersToSet[defaultHeader], &rsaKey.PublicKey)
 }
 
+func TestPEMFileCachedAfterFirstRead(t *testing.T) {
+	_, keyPEM := generateRSAKey(t)
+	f, err := os.CreateTemp("", "backend-jwt-pem-cache-*.pem")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(keyPEM); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	f.Close()
+
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := map[string]interface{}{
+		"signingKey": map[string]interface{}{"path": f.Name()},
+		"algorithm":  "SHA256withRSA",
+	}
+
+	// First call — populates pemCache.
+	reqCtx1 := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "user-a"})
+	p.OnRequestHeaders(context.Background(), reqCtx1, params)
+
+	p.keyMu.RLock()
+	_, cached := p.pemCache[f.Name()]
+	p.keyMu.RUnlock()
+	if !cached {
+		t.Fatal("expected PEM bytes to be cached after first path read")
+	}
+
+	// Delete the file — a second call must succeed using cached bytes.
+	os.Remove(f.Name())
+	reqCtx2 := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "user-b"})
+	result := p.OnRequestHeaders(context.Background(), reqCtx2, params)
+	if _, ok := result.(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Errorf("expected success from pemCache after file deletion, got %T", result)
+	}
+}
+
 func TestKeyCaching(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 
 	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "judy"}
@@ -488,7 +526,7 @@ func TestKeyCaching(t *testing.T) {
 
 func TestAudienceAndCredentialID(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 
 	reqCtx := newRequestContext(&policy.AuthContext{
@@ -517,7 +555,7 @@ func TestAudienceAndCredentialID(t *testing.T) {
 
 func TestAlgorithm_SHA256withRSA(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"signingKey":  map[string]interface{}{"inline": keyPEM},
 		"algorithm":   "SHA256withRSA",
@@ -544,7 +582,7 @@ func TestAlgorithm_SHA256withRSA(t *testing.T) {
 }
 
 func TestAlgorithm_NONE(t *testing.T) {
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"algorithm":   "NONE",
 		"tokenExpiry": "15m",
@@ -571,7 +609,7 @@ func TestAlgorithm_NONE(t *testing.T) {
 }
 
 func TestAlgorithm_NONE_ValidateSkipsKey(t *testing.T) {
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	err := p.Validate(map[string]interface{}{
 		"algorithm": "NONE",
 		// no signingKey — must not error
@@ -583,7 +621,7 @@ func TestAlgorithm_NONE_ValidateSkipsKey(t *testing.T) {
 
 func TestAlgorithm_UnknownReturns500(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"signingKey": map[string]interface{}{"inline": keyPEM},
 		"algorithm":  "SuperAlgorithmXYZ",
@@ -606,6 +644,7 @@ func TestTokenCache_HitReturnsSameToken(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
+		pemCache:   make(map[string][]byte),
 		tokenCache: make(map[string]cachedToken),
 	}
 	params := baseParams(keyPEM)
@@ -634,6 +673,7 @@ func TestTokenCache_MissOnDifferentSubject(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
+		pemCache:   make(map[string][]byte),
 		tokenCache: make(map[string]cachedToken),
 	}
 	params := baseParams(keyPEM)
@@ -656,6 +696,7 @@ func TestTokenCache_MissOnDifferentAPIContext(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
+		pemCache:   make(map[string][]byte),
 		tokenCache: make(map[string]cachedToken),
 	}
 	params := baseParams(keyPEM)
@@ -691,25 +732,15 @@ func TestTokenCache_MissOnDifferentCustomClaim(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
+		pemCache:   make(map[string][]byte),
 		tokenCache: make(map[string]cachedToken),
 	}
 	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "dave"}
 
-	makeParams := func(tenantHeader string) map[string]interface{} {
-		reqCtx := &policy.RequestHeaderContext{
-			SharedContext: &policy.SharedContext{
-				RequestID: "x", Metadata: make(map[string]interface{}), AuthContext: authCtx,
-			},
-			Headers: policy.NewHeaders(map[string][]string{"x-tenant-id": {tenantHeader}}),
-			Path:    "/api", Method: "GET",
-		}
-		// We need to call OnRequestHeaders with this reqCtx; params carry the customClaims config.
-		_ = reqCtx
-		return map[string]interface{}{
-			"signingKey":   map[string]interface{}{"inline": keyPEM},
-			"algorithm":    "SHA256withRSA",
-			"customClaims": map[string]interface{}{"tenantId": "$ctx:request.header.x-tenant-id"},
-		}
+	params := map[string]interface{}{
+		"signingKey":   map[string]interface{}{"inline": keyPEM},
+		"algorithm":    "SHA256withRSA",
+		"customClaims": map[string]interface{}{"tenantId": "$ctx:request.header.x-tenant-id"},
 	}
 
 	makeReqCtx := func(tenantHeader string) *policy.RequestHeaderContext {
@@ -722,8 +753,8 @@ func TestTokenCache_MissOnDifferentCustomClaim(t *testing.T) {
 		}
 	}
 
-	r1 := p.OnRequestHeaders(context.Background(), makeReqCtx("acme"), makeParams("acme"))
-	r2 := p.OnRequestHeaders(context.Background(), makeReqCtx("globex"), makeParams("globex"))
+	r1 := p.OnRequestHeaders(context.Background(), makeReqCtx("acme"), params)
+	r2 := p.OnRequestHeaders(context.Background(), makeReqCtx("globex"), params)
 
 	tok1 := r1.(policy.UpstreamRequestHeaderModifications).HeadersToSet[defaultHeader]
 	tok2 := r2.(policy.UpstreamRequestHeaderModifications).HeadersToSet[defaultHeader]
@@ -739,6 +770,7 @@ func TestTokenCache_ExpiryRespected(t *testing.T) {
 	// same token string, making "different string" an unreliable expiry signal.
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
+		pemCache:   make(map[string][]byte),
 		tokenCache: make(map[string]cachedToken),
 	}
 
@@ -766,6 +798,7 @@ func TestTokenCache_ExpiryRespected(t *testing.T) {
 func TestTokenCache_EvictExpired(t *testing.T) {
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
+		pemCache:   make(map[string][]byte),
 		tokenCache: make(map[string]cachedToken),
 	}
 	now := time.Now()
@@ -794,7 +827,7 @@ func TestTokenCache_EvictExpired(t *testing.T) {
 
 func TestContextClaims_StaticPassthrough(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"env": "production"}
 
@@ -810,7 +843,7 @@ func TestContextClaims_StaticPassthrough(t *testing.T) {
 
 func TestContextClaims_RequestPath(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"req_path": "$ctx:request.path"}
 
@@ -836,7 +869,7 @@ func TestContextClaims_RequestPath(t *testing.T) {
 
 func TestContextClaims_RequestHeader(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"tenant": "$ctx:request.header.x-tenant-id"}
 
@@ -862,7 +895,7 @@ func TestContextClaims_RequestHeader(t *testing.T) {
 
 func TestContextClaims_APIName(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"api": "$ctx:api.name"}
 
@@ -889,7 +922,7 @@ func TestContextClaims_APIName(t *testing.T) {
 
 func TestContextClaims_AuthCredentialID(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"clientId": "$ctx:auth.credential_id"}
 
@@ -911,7 +944,7 @@ func TestContextClaims_AuthCredentialID(t *testing.T) {
 
 func TestContextClaims_AuthProperty(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"clientName": "$ctx:auth.property.client_name"}
 
@@ -933,7 +966,7 @@ func TestContextClaims_AuthProperty(t *testing.T) {
 
 func TestContextClaims_MissingHeader(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"tenant": "$ctx:request.header.x-tenant-id"}
 
@@ -951,7 +984,7 @@ func TestContextClaims_MissingHeader(t *testing.T) {
 
 func TestContextClaims_UnknownVariable(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{"x": "$ctx:unknown.variable.name"}
 
@@ -996,7 +1029,7 @@ func TestContextClaims_NilAuthContext(t *testing.T) {
 
 func TestCustomClaims_RestrictedClaimsOverrideWithWarn(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 	params["customClaims"] = map[string]interface{}{
 		"iss": "https://custom-issuer.example.com",

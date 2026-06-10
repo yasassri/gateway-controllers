@@ -39,7 +39,7 @@ If no authentication context is present:
 |---|---|---|---|
 | `signingKey.inline` | string | — | PEM-encoded RSA or ECDSA private key (mutually exclusive with `path`) |
 | `signingKey.path` | string | — | Path to a PEM private key file (mutually exclusive with `inline`) |
-| `algorithm` | string | `RS256` | Signing algorithm: `RS256`, `RS384`, `RS512` (RSA) or `ES256`, `ES384`, `ES512` (ECDSA) |
+| `algorithm` | string | `SHA256withRSA` | Signing algorithm: `SHA256withRSA` (RSA) or `ES256` (ECDSA) or `NONE` (unsigned) |
 | `issuer` | string | `""` | Value of the `iss` claim in generated tokens |
 | `tokenExpiry` | string | `15m` | Token validity as a Go duration string (e.g. `"15m"`, `"1h"`) |
 
@@ -87,7 +87,7 @@ customClaims:
 system:
   signingKey:
     path: /etc/certs/backend-jwt.key
-  algorithm: RS256
+  algorithm: SHA256withRSA
   issuer: https://gateway.example.com
   tokenExpiry: 15m
 
