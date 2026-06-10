@@ -49,22 +49,6 @@ func generateRSAKey(t *testing.T) (*rsa.PrivateKey, string) {
 	return key, string(pemBytes)
 }
 
-func generateECKey(t *testing.T) (*ecdsa.PrivateKey, string) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate ECDSA key: %v", err)
-	}
-	der, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatalf("marshal ECDSA key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{
-		Type:  "EC PRIVATE KEY",
-		Bytes: der,
-	})
-	return key, string(pemBytes)
-}
 
 func newRequestContext(authCtx *policy.AuthContext) *policy.RequestHeaderContext {
 	return &policy.RequestHeaderContext{
@@ -84,7 +68,7 @@ func baseParams(pemKey string) map[string]interface{} {
 		"signingKey": map[string]interface{}{
 			"inline": pemKey,
 		},
-		"algorithm":   "RS256",
+		"algorithm":   "SHA256withRSA",
 		"issuer":      "https://gateway.example.com",
 		"tokenExpiry": "15m",
 	}
@@ -103,6 +87,20 @@ func decodeJWT(t *testing.T, tokenStr string, verifyKey interface{}) jwt.MapClai
 		t.Fatal("claims are not MapClaims")
 	}
 	return claims
+}
+
+func generateECKey(t *testing.T) (*ecdsa.PrivateKey, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ECDSA key: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal ECDSA key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	return key, string(pemBytes)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -326,12 +324,12 @@ func TestTokenExpiry(t *testing.T) {
 	}
 }
 
-func TestRS256Signing(t *testing.T) {
+func TestSHA256withRSASigning(t *testing.T) {
 	rsaKey, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
 
-	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "rs256-user"})
+	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "rsa-user"})
 	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
 	mods := result.(policy.UpstreamRequestHeaderModifications)
 
@@ -340,18 +338,16 @@ func TestRS256Signing(t *testing.T) {
 		t.Fatal("no JWT header set")
 	}
 
-	// Verify the token header uses RS256
 	token, _, err := jwt.NewParser().ParseUnverified(tokenStr, jwt.MapClaims{})
 	if err != nil {
 		t.Fatalf("parse unverified: %v", err)
 	}
 	if token.Method != jwt.SigningMethodRS256 {
-		t.Errorf("expected RS256 signing method, got %v", token.Method.Alg())
+		t.Errorf("SHA256withRSA must produce RS256 token, got %v", token.Method.Alg())
 	}
-
-	// Verify signature using the public key
 	decodeJWT(t, tokenStr, &rsaKey.PublicKey)
 }
+
 
 func TestES256Signing(t *testing.T) {
 	ecKey, keyPEM := generateECKey(t)
@@ -370,7 +366,6 @@ func TestES256Signing(t *testing.T) {
 	if !ok {
 		t.Fatal("no JWT header set")
 	}
-
 	token, _, err := jwt.NewParser().ParseUnverified(tokenStr, jwt.MapClaims{})
 	if err != nil {
 		t.Fatalf("parse unverified: %v", err)
@@ -378,8 +373,27 @@ func TestES256Signing(t *testing.T) {
 	if token.Method != jwt.SigningMethodES256 {
 		t.Errorf("expected ES256 signing method, got %v", token.Method.Alg())
 	}
-
 	decodeJWT(t, tokenStr, &ecKey.PublicKey)
+}
+
+func TestMismatchedAlgorithmAndKey(t *testing.T) {
+	_, ecKeyPEM := generateECKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	params := map[string]interface{}{
+		"signingKey": map[string]interface{}{"inline": ecKeyPEM},
+		"algorithm":  "SHA256withRSA", // EC key with RSA algorithm
+	}
+
+	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "henry"})
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+
+	resp, ok := result.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse on key/algorithm mismatch, got %T", result)
+	}
+	if resp.StatusCode != 500 {
+		t.Errorf("expected status 500, got %d", resp.StatusCode)
+	}
 }
 
 func TestCustomHeader(t *testing.T) {
@@ -406,7 +420,7 @@ func TestInvalidPrivateKey(t *testing.T) {
 		"signingKey": map[string]interface{}{
 			"inline": "not-a-valid-pem-key",
 		},
-		"algorithm": "RS256",
+		"algorithm": "SHA256withRSA",
 	}
 
 	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "grace"})
@@ -421,25 +435,6 @@ func TestInvalidPrivateKey(t *testing.T) {
 	}
 }
 
-func TestMismatchedAlgorithmAndKey(t *testing.T) {
-	_, rsaKeyPEM := generateRSAKey(t)
-	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
-	params := map[string]interface{}{
-		"signingKey": map[string]interface{}{"inline": rsaKeyPEM},
-		"algorithm":  "ES256", // wrong: RSA key with ECDSA algorithm
-	}
-
-	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "henry"})
-	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
-
-	resp, ok := result.(policy.ImmediateResponse)
-	if !ok {
-		t.Fatalf("expected ImmediateResponse on key/algorithm mismatch, got %T", result)
-	}
-	if resp.StatusCode != 500 {
-		t.Errorf("expected status 500, got %d", resp.StatusCode)
-	}
-}
 
 func TestValidate_MissingKey(t *testing.T) {
 	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
@@ -487,7 +482,7 @@ func TestKeyFilePath(t *testing.T) {
 	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
 	params := map[string]interface{}{
 		"signingKey": map[string]interface{}{"path": f.Name()},
-		"algorithm":  "RS256",
+		"algorithm":  "SHA256withRSA",
 	}
 
 	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "irene"})
@@ -552,6 +547,93 @@ func TestAudienceAndCredentialID(t *testing.T) {
 	_ = audRaw // audience is present; exact type depends on JWT library serialisation
 }
 
+// ─── Algorithm Tests ──────────────────────────────────────────────────────────
+
+func TestAlgorithm_SHA256withRSA(t *testing.T) {
+	rsaKey, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	params := map[string]interface{}{
+		"signingKey":  map[string]interface{}{"inline": keyPEM},
+		"algorithm":   "SHA256withRSA",
+		"issuer":      "https://gateway.example.com",
+		"tokenExpiry": "15m",
+	}
+
+	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice"})
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	mods, ok := result.(policy.UpstreamRequestHeaderModifications)
+	if !ok {
+		t.Fatalf("expected UpstreamRequestHeaderModifications, got %T", result)
+	}
+
+	tokenStr := mods.HeadersToSet[defaultHeader]
+	token, _, err := jwt.NewParser().ParseUnverified(tokenStr, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse unverified: %v", err)
+	}
+	if token.Method != jwt.SigningMethodRS256 {
+		t.Errorf("SHA256withRSA must produce RS256 token, got %v", token.Method.Alg())
+	}
+	decodeJWT(t, tokenStr, &rsaKey.PublicKey)
+}
+
+func TestAlgorithm_NONE(t *testing.T) {
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	params := map[string]interface{}{
+		"algorithm":   "NONE",
+		"tokenExpiry": "15m",
+	}
+
+	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice"})
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	mods, ok := result.(policy.UpstreamRequestHeaderModifications)
+	if !ok {
+		t.Fatalf("expected UpstreamRequestHeaderModifications, got %T", result)
+	}
+
+	tokenStr := mods.HeadersToSet[defaultHeader]
+	if tokenStr == "" {
+		t.Fatal("expected non-empty token for NONE algorithm")
+	}
+	token, _, err := jwt.NewParser().ParseUnverified(tokenStr, jwt.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse unverified: %v", err)
+	}
+	if token.Method != jwt.SigningMethodNone {
+		t.Errorf("NONE algorithm must produce unsigned token, got alg=%v", token.Method.Alg())
+	}
+}
+
+func TestAlgorithm_NONE_ValidateSkipsKey(t *testing.T) {
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	err := p.Validate(map[string]interface{}{
+		"algorithm": "NONE",
+		// no signingKey — must not error
+	})
+	if err != nil {
+		t.Errorf("Validate with NONE algorithm must not require a signing key, got: %v", err)
+	}
+}
+
+func TestAlgorithm_UnknownReturns500(t *testing.T) {
+	_, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), tokenCache: make(map[string]cachedToken)}
+	params := map[string]interface{}{
+		"signingKey": map[string]interface{}{"inline": keyPEM},
+		"algorithm":  "SuperAlgorithmXYZ",
+	}
+
+	reqCtx := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "bob"})
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	resp, ok := result.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("unknown algorithm must return 500, got %T", result)
+	}
+	if resp.StatusCode != 500 {
+		t.Errorf("expected status 500, got %d", resp.StatusCode)
+	}
+}
+
 // ─── Token Cache Tests ────────────────────────────────────────────────────────
 
 func TestTokenCache_HitReturnsSameToken(t *testing.T) {
@@ -604,7 +686,7 @@ func TestTokenCache_MissOnDifferentSubject(t *testing.T) {
 	}
 }
 
-func TestTokenCache_MissOnDifferentOperation(t *testing.T) {
+func TestTokenCache_MissOnDifferentAPIContext(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
@@ -613,13 +695,13 @@ func TestTokenCache_MissOnDifferentOperation(t *testing.T) {
 	params := baseParams(keyPEM)
 	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "carol"}
 
-	makeCtx := func(operation string) *policy.RequestHeaderContext {
+	makeCtx := func(apiContext string) *policy.RequestHeaderContext {
 		return &policy.RequestHeaderContext{
 			SharedContext: &policy.SharedContext{
-				RequestID:     "test",
-				Metadata:      make(map[string]interface{}),
-				AuthContext:   authCtx,
-				OperationPath: operation,
+				RequestID:   "test",
+				Metadata:    make(map[string]interface{}),
+				AuthContext: authCtx,
+				APIContext:  apiContext,
 			},
 			Headers: policy.NewHeaders(map[string][]string{}),
 			Path:    "/api/v1",
@@ -627,15 +709,15 @@ func TestTokenCache_MissOnDifferentOperation(t *testing.T) {
 		}
 	}
 
-	p.OnRequestHeaders(context.Background(), makeCtx("/pets/{id}"), params)
-	p.OnRequestHeaders(context.Background(), makeCtx("/orders/{id}"), params)
+	p.OnRequestHeaders(context.Background(), makeCtx("/petstore/v1"), params)
+	p.OnRequestHeaders(context.Background(), makeCtx("/orders/v1"), params)
 
-	// Different operation paths → different cache keys → two separate cache entries.
+	// Different API contexts → different cache keys → two separate cache entries.
 	p.tokenMu.RLock()
 	count := len(p.tokenCache)
 	p.tokenMu.RUnlock()
 	if count != 2 {
-		t.Errorf("expected 2 cache entries for 2 different operation paths, got %d", count)
+		t.Errorf("expected 2 cache entries for 2 different API contexts, got %d", count)
 	}
 }
 
@@ -659,7 +741,7 @@ func TestTokenCache_MissOnDifferentCustomClaim(t *testing.T) {
 		_ = reqCtx
 		return map[string]interface{}{
 			"signingKey":   map[string]interface{}{"inline": keyPEM},
-			"algorithm":    "RS256",
+			"algorithm":    "SHA256withRSA",
 			"customClaims": map[string]interface{}{"tenantId": "$ctx:request.header.x-tenant-id"},
 		}
 	}

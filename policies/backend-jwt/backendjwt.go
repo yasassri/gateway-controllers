@@ -40,7 +40,7 @@ import (
 const (
 	defaultHeader      = "x-jwt-assertion"
 	defaultTokenExpiry = 15 * time.Minute
-	defaultAlgorithm   = "RS256"
+	defaultAlgorithm   = "SHA256withRSA"
 	minCacheTTL        = 30 * time.Second
 )
 
@@ -68,6 +68,20 @@ type BackendJWTPolicy struct {
 
 	tokenMu    sync.RWMutex
 	tokenCache map[string]cachedToken
+}
+
+// algorithmEntry describes a supported JWT signing algorithm.
+// To add a new algorithm: add a single entry to the algorithms map below.
+type algorithmEntry struct {
+	method  jwt.SigningMethod
+	keyType string // "rsa", "ecdsa", or "none"
+}
+
+// algorithms is the single source of truth for supported signing algorithms.
+var algorithms = map[string]algorithmEntry{
+	"SHA256withRSA": {jwt.SigningMethodRS256, "rsa"},
+	"ES256":         {jwt.SigningMethodES256, "ecdsa"},
+	"NONE":          {jwt.SigningMethodNone, "none"},
 }
 
 var ins = &BackendJWTPolicy{
@@ -115,16 +129,26 @@ func (p *BackendJWTPolicy) Mode() policy.ProcessingMode {
 	}
 }
 
-// Validate checks that the signing key is present and parseable at config load time.
+// Validate checks the algorithm is supported and, for key-based algorithms,
+// that the signing key is present and parseable at config load time.
 func (p *BackendJWTPolicy) Validate(params map[string]interface{}) error {
+	alg := getString(params, "algorithm", defaultAlgorithm)
+	entry, ok := algorithms[alg]
+	if !ok {
+		return fmt.Errorf("unsupported algorithm %q; supported: %s", alg, algorithmList())
+	}
+	if entry.keyType == "none" {
+		return nil
+	}
 	pemBytes, err := extractSigningKeyPEM(params)
 	if err != nil {
 		return fmt.Errorf("invalid signingKey: %w", err)
 	}
-	if _, err := parsePrivateKey(pemBytes); err != nil {
+	key, err := parsePrivateKey(pemBytes)
+	if err != nil {
 		return fmt.Errorf("invalid signingKey: %w", err)
 	}
-	return nil
+	return checkKeyType(key, entry.keyType, alg)
 }
 
 // OnRequestHeaders generates a signed JWT from the auth context and sets it on the upstream request.
@@ -145,7 +169,12 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		return policy.UpstreamRequestHeaderModifications{}
 	}
 
-	algorithm := getString(params, "algorithm", defaultAlgorithm)
+	alg := getString(params, "algorithm", defaultAlgorithm)
+	entry, ok := algorithms[alg]
+	if !ok {
+		slog.Error("Backend JWT: unsupported algorithm", "algorithm", alg)
+		return internalError()
+	}
 	issuer := getString(params, "issuer", "")
 	expiry := parseDuration(getString(params, "tokenExpiry", ""), defaultTokenExpiry)
 	headerName := getString(params, "header", defaultHeader)
@@ -154,8 +183,8 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	extras := resolveExtraClaims(authCtx, reqCtx, params)
 
 	cacheKey := buildTokenCacheKey(
-		authCtx.Subject, authCtx.CredentialID, authCtx.AuthType, authCtx.Issuer,
-		reqCtx.OperationPath, issuer, algorithm, extras,
+		authCtx.CredentialID, authCtx.Subject, reqCtx.APIContext, reqCtx.APIVersion,
+		authCtx.Audience, extras,
 	)
 	if signed, ok := p.getCachedToken(cacheKey); ok {
 		slog.Debug("Backend JWT: cache hit", "subject", authCtx.Subject)
@@ -164,22 +193,26 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		}
 	}
 
-	pemBytes, err := extractSigningKeyPEM(params)
-	if err != nil {
-		slog.Error("Backend JWT: failed to extract signing key", "error", err)
-		return internalError()
-	}
-
-	privateKey, err := p.loadKey(pemBytes)
-	if err != nil {
-		slog.Error("Backend JWT: failed to parse signing key", "error", err)
-		return internalError()
-	}
-
-	signingMethod, err := getSigningMethod(algorithm, privateKey)
-	if err != nil {
-		slog.Error("Backend JWT: unsupported algorithm or mismatched key type", "algorithm", algorithm, "error", err)
-		return internalError()
+	signingMethod := entry.method
+	var signKey interface{}
+	if entry.keyType == "none" {
+		signKey = jwt.UnsafeAllowNoneSignatureType
+	} else {
+		pemBytes, err := extractSigningKeyPEM(params)
+		if err != nil {
+			slog.Error("Backend JWT: failed to extract signing key", "error", err)
+			return internalError()
+		}
+		key, err := p.loadKey(pemBytes)
+		if err != nil {
+			slog.Error("Backend JWT: failed to parse signing key", "error", err)
+			return internalError()
+		}
+		if err := checkKeyType(key, entry.keyType, alg); err != nil {
+			slog.Error("Backend JWT: key type mismatch", "algorithm", alg, "error", err)
+			return internalError()
+		}
+		signKey = key
 	}
 
 	now := time.Now()
@@ -209,7 +242,7 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	}
 
 	token := jwt.NewWithClaims(signingMethod, claims)
-	signed, err := token.SignedString(privateKey)
+	signed, err := token.SignedString(signKey)
 	if err != nil {
 		slog.Error("Backend JWT: failed to sign token", "error", err)
 		return internalError()
@@ -293,10 +326,13 @@ func resolveExtraClaims(authCtx *policy.AuthContext, reqCtx *policy.RequestHeade
 	return result
 }
 
-// buildTokenCacheKey returns a hex SHA256 of all fields that determine what the generated JWT contains.
-// resolvedClaims are sorted so the key is deterministic regardless of map iteration order.
-func buildTokenCacheKey(subject, credentialID, authType, originalIssuer, operationPath, issuer, algorithm string, extras resolvedClaims) string {
-	// Collect all extra claim keys, merging both maps.
+// buildTokenCacheKey returns a hex SHA256 of the fields that determine what the generated JWT contains.
+// audience and extra claims are sorted so the key is deterministic regardless of slice/map ordering.
+func buildTokenCacheKey(credentialID, subject, apiContext, apiVersion string, audience []string, extras resolvedClaims) string {
+	sortedAud := make([]string, len(audience))
+	copy(sortedAud, audience)
+	sort.Strings(sortedAud)
+
 	allKeys := make([]string, 0, len(extras.stringClaims)+len(extras.rawClaims))
 	for k := range extras.stringClaims {
 		allKeys = append(allKeys, k)
@@ -309,19 +345,15 @@ func buildTokenCacheKey(subject, credentialID, authType, originalIssuer, operati
 	sort.Strings(allKeys)
 
 	var sb strings.Builder
-	sb.WriteString(subject)
-	sb.WriteByte('|')
 	sb.WriteString(credentialID)
 	sb.WriteByte('|')
-	sb.WriteString(authType)
+	sb.WriteString(subject)
 	sb.WriteByte('|')
-	sb.WriteString(originalIssuer)
+	sb.WriteString(apiContext)
 	sb.WriteByte('|')
-	sb.WriteString(operationPath)
+	sb.WriteString(apiVersion)
 	sb.WriteByte('|')
-	sb.WriteString(issuer)
-	sb.WriteByte('|')
-	sb.WriteString(algorithm)
+	sb.WriteString(strings.Join(sortedAud, ","))
 	for _, k := range allKeys {
 		sb.WriteByte('|')
 		sb.WriteString(k)
@@ -427,43 +459,29 @@ func parsePrivateKey(pemBytes []byte) (crypto.PrivateKey, error) {
 	}
 }
 
-// getSigningMethod returns the jwt.SigningMethod for the given algorithm string,
-// validating that the private key type matches.
-func getSigningMethod(algorithm string, key crypto.PrivateKey) (jwt.SigningMethod, error) {
-	switch algorithm {
-	case "RS256":
+// checkKeyType verifies that key matches the type required by the given algorithm.
+func checkKeyType(key crypto.PrivateKey, keyType, algorithm string) error {
+	switch keyType {
+	case "rsa":
 		if _, ok := key.(*rsa.PrivateKey); !ok {
-			return nil, fmt.Errorf("RS256 requires an RSA private key, got %T", key)
+			return fmt.Errorf("%s requires an RSA private key, got %T", algorithm, key)
 		}
-		return jwt.SigningMethodRS256, nil
-	case "RS384":
-		if _, ok := key.(*rsa.PrivateKey); !ok {
-			return nil, fmt.Errorf("RS384 requires an RSA private key, got %T", key)
-		}
-		return jwt.SigningMethodRS384, nil
-	case "RS512":
-		if _, ok := key.(*rsa.PrivateKey); !ok {
-			return nil, fmt.Errorf("RS512 requires an RSA private key, got %T", key)
-		}
-		return jwt.SigningMethodRS512, nil
-	case "ES256":
+	case "ecdsa":
 		if _, ok := key.(*ecdsa.PrivateKey); !ok {
-			return nil, fmt.Errorf("ES256 requires an ECDSA private key, got %T", key)
+			return fmt.Errorf("%s requires an ECDSA private key, got %T", algorithm, key)
 		}
-		return jwt.SigningMethodES256, nil
-	case "ES384":
-		if _, ok := key.(*ecdsa.PrivateKey); !ok {
-			return nil, fmt.Errorf("ES384 requires an ECDSA private key, got %T", key)
-		}
-		return jwt.SigningMethodES384, nil
-	case "ES512":
-		if _, ok := key.(*ecdsa.PrivateKey); !ok {
-			return nil, fmt.Errorf("ES512 requires an ECDSA private key, got %T", key)
-		}
-		return jwt.SigningMethodES512, nil
-	default:
-		return nil, fmt.Errorf("unsupported algorithm %q; supported: RS256, RS384, RS512, ES256, ES384, ES512", algorithm)
 	}
+	return nil
+}
+
+// algorithmList returns a sorted, comma-separated list of supported algorithm names.
+func algorithmList() string {
+	names := make([]string, 0, len(algorithms))
+	for k := range algorithms {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 func getString(params map[string]interface{}, key, defaultVal string) string {
