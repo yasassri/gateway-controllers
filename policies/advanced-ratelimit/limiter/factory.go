@@ -28,7 +28,7 @@ import (
 type Config struct {
 	Algorithm       string
 	Limits          []LimitConfig
-	Backend         string // "memory" or "redis"
+	Backend         string // "memory", "redis", or "redis-local-async"
 	RedisClient     redis.UniversalClient
 	KeyPrefix       string
 	CleanupInterval time.Duration

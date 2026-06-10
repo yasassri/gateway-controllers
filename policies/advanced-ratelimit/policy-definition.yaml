@@ -323,9 +323,11 @@ systemParameters:
     backend:
       type: string
       description: |
-        Specifies the storage backend: memory for single-instance limits or redis
-        for distributed limits.
-      enum: ["memory", "redis"]
+        Specifies the storage backend: memory for single-instance limits, redis for
+        exact distributed limits (one Redis call per request), or redis-local-async for
+        distributed limits with a local-first hot path that reconciles with Redis
+        asynchronously (lower latency and Redis load, with bounded overshoot).
+      enum: ["memory", "redis", "redis-local-async"]
       default: "memory"
       "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.backend}"
 
@@ -431,6 +433,22 @@ systemParameters:
             Use "0" to disable cleanup.
           default: "5m"
           "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.memory.cleanup_interval}"
+
+    local:
+      type: object
+      description: Configures the local-first hot path when backend is redis-local-async.
+      additionalProperties: false
+      properties:
+        syncInterval:
+          type: string
+          description: |
+            Specifies how often locally counted requests are flushed to Redis and the
+            authoritative count is read back. Lower values tighten accuracy (less
+            overshoot) at the cost of more Redis operations. Supports units ns, us, µs,
+            ms, s, m, h, including composite and fractional values (for example "500ms",
+            "1.5s", "1m30s").
+          default: "50ms"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.sync_interval}"
 
     headers:
       type: object

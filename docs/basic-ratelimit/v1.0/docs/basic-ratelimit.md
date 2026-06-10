@@ -29,9 +29,10 @@ These parameters are configured globally and shared with the advanced rate limit
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `algorithm` | string | No | `"fixed-window"` | Rate limiting algorithm: `"gcra"` for smooth token-bucket-style throttling, or `"fixed-window"` for window-based counters. |
-| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance operation, or `"redis"` for distributed quotas across gateway instances. |
-| `redis` | `Redis` object | No | - | Redis configuration. Used when `backend=redis`. |
+| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance operation, `"redis"` for exact distributed quotas (one Redis call per request), or `"redis-local-async"` for distributed quotas with a local-first hot path that reconciles with Redis asynchronously. |
+| `redis` | `Redis` object | No | - | Redis configuration. Used when `backend=redis` or `backend=redis-local-async`. |
 | `memory` | `Memory` object | No | - | In-memory storage configuration. Used when `backend=memory`. |
+| `local` | `Local` object | No | - | Local-first hot-path configuration. Used when `backend=redis-local-async`. |
 
 #### Redis Configuration
 
@@ -58,6 +59,18 @@ When using in-memory backend, configure the following under `memory`:
 |-----------|------|----------|---------|-------------|
 | `maxEntries` | integer | No | `10000` | Maximum number of rate limit entries stored in memory. Old entries are evicted when this limit is reached. |
 | `cleanupInterval` | string | No | `"5m"` | Interval for cleaning up expired entries (Go duration format). Use `"0"` to disable periodic cleanup. |
+
+#### Local (redis-local-async) Configuration
+
+The `redis-local-async` backend counts requests in-memory on the hot path (no Redis call per request) and reconciles with Redis every `syncInterval` using the same key scheme as the `redis` backend, so replicas share the quota. It trades exactness for lower per-request latency and lower Redis load: the limit may be exceeded by up to roughly **`limit + (replicas − 1) × rate × syncInterval`** before all replicas converge. It uses the `redis` block for connectivity (including `failureMode`); on a Redis outage `failureMode=open` degrades to per-replica enforcement (not unlimited), while `closed` blocks traffic.
+
+Configure the following under `local`:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `syncInterval` | string | No | `"50ms"` | How often locally counted requests are flushed to Redis and the authoritative count is read back (Go duration format). Lower values tighten accuracy (less overshoot) at the cost of more Redis flushes; raise it for very high key cardinality (flush load ≈ active_keys × replicas / interval). |
+
+> Currently supported for the `fixed-window` algorithm and standard per-request counting. Cost-extraction quotas (token/LLM-cost) fall back to the synchronous Redis path.
 
 ### User Parameters (API Definition)
 

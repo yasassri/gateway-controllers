@@ -190,24 +190,31 @@ func GetPolicy(
 		}
 	}
 
-	// Initialize limiters for each quota based on backend
+	// Initialize limiters for each quota based on backend.
+	// "redis"             -> shared Redis counter, one limiter per quota (no local cache).
+	// "redis-local-async" -> local-first counting + async Redis reconcile; needs the Redis
+	//                        client AND the shared limiter cache (holds a flusher goroutine).
+	// "memory"            -> per-replica counting via the shared limiter cache.
 	var redisClient *redis.Client
 	redisFailOpen := true
-	var baseCacheKey string // Set for memory backend to track limiters
+	redisKeyPrefix := getStringParam(params, "redis.keyPrefix", "ratelimit:v1:")
+	localSyncInterval := getDurationParam(params, "local.syncInterval", 50*time.Millisecond)
+	var baseCacheKey string // Set for cache-backed backends (memory, redis-local-async)
+
+	usesRedis := backend == "redis" || backend == "redis-local-async"
 
 	slog.Debug("Initializing rate limiter backend",
 		"backend", backend,
 		"algorithm", algorithm,
 		"quotaCount", len(quotas))
 
-	if backend == "redis" {
+	if usesRedis {
 		// Parse Redis configuration
 		redisHost := getStringParam(params, "redis.host", "localhost")
 		redisPort := getIntParam(params, "redis.port", 6379)
 		redisPassword := getStringParam(params, "redis.password", "")
 		redisUsername := getStringParam(params, "redis.username", "")
 		redisDB := getIntParam(params, "redis.db", 0)
-		keyPrefix := getStringParam(params, "redis.keyPrefix", "ratelimit:v1:")
 		failureMode := getStringParam(params, "redis.failureMode", "open")
 		redisFailOpen = (failureMode == "open")
 
@@ -236,8 +243,10 @@ func GetPolicy(
 			}
 			slog.Warn("Redis connection failed but failureMode=open", "error", err)
 		}
+	}
 
-		// Create a limiter per quota
+	if backend == "redis" {
+		// Create a limiter per quota (Redis holds the state; no local cache needed)
 		for i := range quotas {
 			q := &quotas[i]
 			limiterLimits := make([]limiter.LimitConfig, len(q.Limits))
@@ -254,7 +263,7 @@ func GetPolicy(
 				Limits:          limiterLimits,
 				Backend:         backend,
 				RedisClient:     redisClient,
-				KeyPrefix:       keyPrefix,
+				KeyPrefix:       redisKeyPrefix,
 				CleanupInterval: 0, // Not used for Redis
 			})
 			if err != nil {
@@ -268,9 +277,11 @@ func GetPolicy(
 			q.Limiter = rlLimiter
 		}
 	} else {
-		// Memory backend - create limiter per quota with caching and automatic cleanup
+		// Cache-backed backends (memory, redis-local-async): create a shared, ref-counted
+		// limiter per quota. redis-local-async holds a per-replica counter + flusher
+		// goroutine, so it MUST be a shared singleton (cached) and Close()d on reload.
 		cleanupInterval := getDurationParam(params, "memory.cleanupInterval", 5*time.Minute)
-		baseCacheKey = getBaseCacheKey(routeName, apiName, algorithm, params)
+		baseCacheKey = getBaseCacheKey(routeName, apiName, algorithm, backend, params)
 
 		// Compute desired quota keys before acquiring lock
 		type quotaInfo struct {
@@ -320,12 +331,24 @@ func GetPolicy(
 					"refCount", entry.refCount)
 			} else {
 				// Create new limiter
-				rlLimiter, err := limiter.CreateLimiter(limiter.Config{
+				limiterConfig := limiter.Config{
 					Algorithm:       algorithm,
 					Limits:          info.limiterLimits,
 					Backend:         backend,
 					CleanupInterval: cleanupInterval,
-				})
+				}
+				// redis-local-async needs the Redis client + key prefix for its async
+				// flush, plus the local tuning (sync interval, fail-open) passed through
+				// AlgorithmConfig.
+				if backend == "redis-local-async" {
+					limiterConfig.RedisClient = redisClient
+					limiterConfig.KeyPrefix = redisKeyPrefix
+					limiterConfig.AlgorithmConfig = map[string]interface{}{
+						"syncInterval": localSyncInterval,
+						"failOpen":     redisFailOpen,
+					}
+				}
+				rlLimiter, err := limiter.CreateLimiter(limiterConfig)
 				if err != nil {
 					quotaName := q.Name
 					if quotaName == "" {
@@ -1075,7 +1098,7 @@ func getDurationFromQuota(q *QuotaRuntime) time.Duration {
 
 // getBaseCacheKey computes a stable hash key base for caching memory-backed limiters.
 // This includes shared aspects like algorithm, headers config, etc.
-func getBaseCacheKey(routeName, apiName, algorithm string, params map[string]interface{}) string {
+func getBaseCacheKey(routeName, apiName, algorithm, backend string, params map[string]interface{}) string {
 	h := sha256.New()
 
 	h.Write([]byte("route:"))
@@ -1088,6 +1111,12 @@ func getBaseCacheKey(routeName, apiName, algorithm string, params map[string]int
 
 	h.Write([]byte("algo:"))
 	h.Write([]byte(algorithm))
+	h.Write([]byte("|"))
+
+	// Include backend so a memory and a redis-local-async limiter for the same
+	// route+algorithm get distinct cache entries (both use this cache path).
+	h.Write([]byte("backend:"))
+	h.Write([]byte(backend))
 	h.Write([]byte("|"))
 
 	// Include memory cleanup interval
