@@ -657,3 +657,64 @@ func TestRedisLocalAsync_BatchPerLimiterSpill(t *testing.T) {
 		t.Fatalf("spill lost or double-counted: total %d, want %d", total, na)
 	}
 }
+
+// TestRedisLocalAsync_FailClosedRecoversAfterRedisOutage is the regression guard for the
+// fail-closed stuck-deny bug: after a Redis outage that spans a window boundary, a
+// fail-closed limiter must resume serving once Redis recovers — it must NOT stay latched in
+// permanent denial. Reproduces the production (coordinator) path deterministically:
+// miniredis.SetError simulates Redis down/up, the fixed clock rolls the window, and the
+// non-started coordinator is driven by tickShard at future times (always due). On the
+// unfixed code the final Allow stays denied (limiter de-enqueued + redisDown never cleared).
+func TestRedisLocalAsync_FailClosedRecoversAfterRedisOutage(t *testing.T) {
+	mr, client := runMiniredis(t)
+	coord := newFlushCoordinator(1, false) // not started; we drive tickShard directly
+	clk := limiter.NewFixedClock(time.Unix(20000, 0))
+	// limit 100 >> the few requests below, so the LOCAL deny-cache ("blocked") never latches:
+	// the only path that can deny here is the fail-closed redisDown latch — exactly what we test.
+	backing := NewRedisLimiter(client, NewPolicy(100, time.Minute), "ratelimit:v1:")
+	lim := newRedisLocalAsyncLimiterWith(backing,
+		LocalAsyncConfig{SyncInterval: 10 * time.Millisecond, FailOpen: false}, coord)
+	lim.WithClock(clk)
+	defer lim.Close()
+
+	// ft returns an always-due tick time (far past every limiter's nextFlushAt deadline).
+	ft := func(i int) time.Time { return time.Now().Add(time.Duration(i) * time.Hour) }
+
+	// Phase 1 — healthy: one allow flushes cleanly to Redis.
+	mustAllow(t, lim, "k")
+	coord.tickShard(0, ft(1))
+
+	// Phase 2 — Redis down: a fresh delta plus a streak of failed flushes latches redisDown.
+	mr.SetError("redis down")
+	mustAllow(t, lim, "k") // redisDown not set yet -> allowed, marks the key dirty
+	for i := 0; i <= failClosedThreshold; i++ {
+		coord.tickShard(0, ft(2+i))
+	}
+	if mustAllow(t, lim, "k") {
+		t.Fatal("fail-closed should deny while Redis is down")
+	}
+
+	// Phase 3 — window rollover during the outage: the stale dirty delta is dropped, so the
+	// limiter's subsequent flush snapshots are empty (the trigger for the stuck state).
+	clk.Set(clk.Now().Add(2 * time.Minute))
+	mustAllow(t, lim, "k") // rolls local state to the new window; still denied (redisDown)
+	for i := 0; i < 3; i++ {
+		coord.tickShard(0, ft(10+i))
+	}
+	if mustAllow(t, lim, "k") {
+		t.Fatal("still denied while Redis is down")
+	}
+
+	// Phase 4 — Redis recovers. A healthy limiter must re-evaluate connectivity and resume,
+	// even though it has no pending deltas to flush.
+	mr.SetError("")
+	for i := 0; i < 3; i++ {
+		coord.tickShard(0, ft(20+i))
+	}
+
+	// The pin: with the bug the limiter is de-enqueued with redisDown stuck true, so this
+	// stays denied forever; with the fix the empty-batch probe clears redisDown and it allows.
+	if !mustAllow(t, lim, "k") {
+		t.Fatal("REGRESSION: fail-closed limiter stuck denying after Redis recovered")
+	}
+}

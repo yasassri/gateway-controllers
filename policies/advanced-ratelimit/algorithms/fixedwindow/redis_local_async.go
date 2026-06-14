@@ -37,6 +37,11 @@ import (
 // interval) matters more than tight accuracy.
 const DefaultSyncInterval = 50 * time.Millisecond
 
+// probePingTimeout bounds the liveness PING a fail-closed limiter issues when it has no
+// deltas to flush but redisDown is latched (see probeRedisLocked). There is no useful work
+// to wait on, so keep it short: fail fast and stay latched until Redis is actually reachable.
+const probePingTimeout = time.Second
+
 // DefaultMaxLocalEntries bounds the per-limiter local key-state map (across all stripes)
 // to cap memory under high/adversarial key cardinality (per-IP / per-user keys).
 const DefaultMaxLocalEntries = 100000
@@ -247,6 +252,10 @@ func (r *RedisLocalAsyncLimiter) AllowN(_ context.Context, key string, n int64) 
 		// Local deny cache: global count already reached the limit this window.
 	case !r.cfg.FailOpen && r.redisDown.Load():
 		// Fail-closed and Redis is down: block rather than admit un-reconciled traffic.
+		// Stay enqueued so the coordinator keeps probing for recovery — redisDown only
+		// clears via a flush/probe, which only runs while the limiter is enqueued. Without
+		// this, a denied request would add no work and never re-arm the limiter.
+		needEnqueue = true
 	case st.globalBase+st.localDelta+n > limit:
 		// Estimate would exceed the limit; latch the deny cache for this window.
 		st.blocked = true
@@ -365,6 +374,12 @@ func (r *RedisLocalAsyncLimiter) flushPending() (more bool) {
 
 	batch, more := r.snapshotPendingLocked(r.cfg.MaxPipelineCommands)
 	if len(batch) == 0 {
+		// No deltas to flush. If we're fail-closed and latched down, still probe Redis so
+		// redisDown can clear after recovery even with nothing to flush (the coordinator's
+		// flushDue does the same — see its empty-batch branch).
+		if !r.cfg.FailOpen && r.redisDown.Load() {
+			r.probeRedisLocked()
+		}
 		return more
 	}
 	cmds, execErrs := execIncrBatch(r.client, batch, 0) // chunkSize 0 = single Exec, as before
@@ -375,6 +390,20 @@ func (r *RedisLocalAsyncLimiter) flushPending() (more bool) {
 	execExpire(r.client, r.expireEntries(batch, creators))
 	r.noteFlushOutcomeLocked(tickErr)
 	return more
+}
+
+// probeRedisLocked re-checks Redis connectivity for a fail-closed limiter that has latched
+// redisDown but currently has no pending deltas to flush (e.g. its dirty delta was dropped
+// on a window rollover during the outage). Without it, such a limiter would never issue
+// another Redis op, so redisDown could never clear after Redis recovered — stranding the
+// limiter in permanent denial. The verdict is routed through noteFlushOutcomeLocked so
+// failStreak/redisDown stay flushMu-guarded (invariant 3). PING is a *connectivity* probe,
+// not a *writeability* one: partial failures (read-only replica, OOM, ACL) will flap rather
+// than stick, which the failClosedThreshold anti-flap already tolerates. Caller holds flushMu.
+func (r *RedisLocalAsyncLimiter) probeRedisLocked() {
+	ctx, cancel := context.WithTimeout(context.Background(), probePingTimeout)
+	defer cancel()
+	r.noteFlushOutcomeLocked(r.client.Ping(ctx).Err() != nil)
 }
 
 // snapshotPendingLocked drains up to `budget` pending entries (evicted first, then dirty,

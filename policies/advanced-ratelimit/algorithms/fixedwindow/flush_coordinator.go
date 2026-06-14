@@ -250,8 +250,24 @@ func (c *flushCoordinator) flushDue(sh *coordShard, due []*RedisLocalAsyncLimite
 		l.flushMu.Lock()
 		batch, more := l.snapshotPendingLocked(l.cfg.MaxPipelineCommands)
 		if len(batch) == 0 {
+			// A fail-closed limiter that has latched redisDown but has nothing to flush
+			// (its dirty delta was just dropped above on a window rollover during the
+			// outage) must still probe Redis here, or redisDown could never clear after
+			// recovery. This drop-then-probe MUST stay co-located in this critical section:
+			// snapshotPendingLocked dropped the stale delta and we re-evaluate health in the
+			// same flushMu hold, so a concurrent delta either was just snapshotted or will
+			// re-enqueue us. Probe BEFORE releasing flushMu; re-enqueue AFTER (sh.mu must
+			// never be held with flushMu — invariant 1).
+			probeStillDown := false
+			if !l.cfg.FailOpen && l.redisDown.Load() {
+				l.probeRedisLocked()
+				probeStillDown = l.redisDown.Load() // still down after the probe?
+			}
 			l.flushMu.Unlock()
-			if more { // defensive; budget>=1 makes this unreachable today
+			// Re-enqueue on a budget spill (more; defensive — unreachable today) or while a
+			// fail-closed limiter is still down, so it keeps probing every tick until Redis
+			// recovers (on a successful probe redisDown clears and it de-enqueues normally).
+			if more || probeStillDown {
 				l.nextFlushAt.Store(nowNanos)
 				if l.enqueued.CompareAndSwap(false, true) {
 					sh.mu.Lock()
