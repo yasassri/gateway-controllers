@@ -681,7 +681,7 @@ func TestTokenCache_MissOnDifferentSubject(t *testing.T) {
 	}
 }
 
-func TestTokenCache_MissOnDifferentAPIContext(t *testing.T) {
+func TestTokenCache_MissOnDifferentPath(t *testing.T) {
 	_, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{
 		keyCache:   make(map[[32]byte]crypto.PrivateKey),
@@ -691,29 +691,55 @@ func TestTokenCache_MissOnDifferentAPIContext(t *testing.T) {
 	params := baseParams(keyPEM)
 	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "carol"}
 
-	makeCtx := func(apiContext string) *policy.RequestHeaderContext {
+	makeCtx := func(path string) *policy.RequestHeaderContext {
 		return &policy.RequestHeaderContext{
 			SharedContext: &policy.SharedContext{
 				RequestID:   "test",
 				Metadata:    make(map[string]interface{}),
 				AuthContext: authCtx,
-				APIContext:  apiContext,
 			},
 			Headers: policy.NewHeaders(map[string][]string{}),
-			Path:    "/api/v1",
+			Path:    path,
 			Method:  "GET",
 		}
 	}
 
-	p.OnRequestHeaders(context.Background(), makeCtx("/petstore/v1"), params)
-	p.OnRequestHeaders(context.Background(), makeCtx("/orders/v1"), params)
+	p.OnRequestHeaders(context.Background(), makeCtx("/petstore/v1/pets"), params)
+	p.OnRequestHeaders(context.Background(), makeCtx("/orders/v1/orders"), params)
 
-	// Different API contexts → different cache keys → two separate cache entries.
+	// Different paths → different cache keys → two separate cache entries.
 	p.tokenMu.RLock()
 	count := len(p.tokenCache)
 	p.tokenMu.RUnlock()
 	if count != 2 {
-		t.Errorf("expected 2 cache entries for 2 different API contexts, got %d", count)
+		t.Errorf("expected 2 cache entries for 2 different paths, got %d", count)
+	}
+}
+
+func TestTokenCache_QueryParamsIgnored(t *testing.T) {
+	// Requests to the same path with different query strings must share one cache entry.
+	_, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice", TokenId: "token-xyz"}
+
+	makeCtx := func(path string) *policy.RequestHeaderContext {
+		return &policy.RequestHeaderContext{
+			SharedContext: &policy.SharedContext{RequestID: "x", Metadata: make(map[string]interface{}), AuthContext: authCtx},
+			Headers:       policy.NewHeaders(map[string][]string{}),
+			Path:          path, Method: "GET",
+		}
+	}
+
+	p.OnRequestHeaders(context.Background(), makeCtx("/api/v1/pets?page=1&limit=10"), params)
+	p.OnRequestHeaders(context.Background(), makeCtx("/api/v1/pets?page=2&limit=10"), params)
+	p.OnRequestHeaders(context.Background(), makeCtx("/api/v1/pets"), params)
+
+	p.tokenMu.RLock()
+	count := len(p.tokenCache)
+	p.tokenMu.RUnlock()
+	if count != 1 {
+		t.Errorf("different query strings on the same path must share one cache entry, got %d", count)
 	}
 }
 
@@ -857,6 +883,33 @@ func TestTokenCacheKey_JWT_SameJTI_HitsCache(t *testing.T) {
 	}
 }
 
+func TestTokenCacheKey_JWT_SameJTI_DifferentHeaderMisses(t *testing.T) {
+	// Same jti but different resolved dynamic claim ($ctx:request.header.*) must not share a cache entry.
+	_, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+	params["customClaims"] = map[string]interface{}{"tenantId": "$ctx:request.header.x-tenant-id"}
+	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice", TokenId: "token-xyz"}
+
+	makeReqCtx := func(tenant string) *policy.RequestHeaderContext {
+		return &policy.RequestHeaderContext{
+			SharedContext: &policy.SharedContext{RequestID: "x", Metadata: make(map[string]interface{}), AuthContext: authCtx},
+			Headers:       policy.NewHeaders(map[string][]string{"x-tenant-id": {tenant}}),
+			Path:          "/api", Method: "GET",
+		}
+	}
+
+	p.OnRequestHeaders(context.Background(), makeReqCtx("acme"), params)
+	p.OnRequestHeaders(context.Background(), makeReqCtx("globex"), params)
+
+	p.tokenMu.RLock()
+	count := len(p.tokenCache)
+	p.tokenMu.RUnlock()
+	if count != 2 {
+		t.Errorf("same jti with different dynamic header values must produce separate cache entries, got %d", count)
+	}
+}
+
 func TestTokenCacheKey_JWT_CrossIssuerNoJTI(t *testing.T) {
 	// Without jti, tokens from different issuers with the same subject must not collide.
 	_, keyPEM := generateRSAKey(t)
@@ -902,25 +955,23 @@ func TestTokenCacheKey_APIKey_DifferentApplicationID(t *testing.T) {
 }
 
 func TestTokenCacheKey_APIKey_SameApplicationID_HitsCache(t *testing.T) {
-	// Same ApplicationID must share one cache entry regardless of other metadata.
+	// Identical auth context must share one cache entry.
 	_, keyPEM := generateRSAKey(t)
 	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
 	params := baseParams(keyPEM)
+	authCtx := &policy.AuthContext{
+		Authenticated: true, AuthType: "apikey",
+		Properties: map[string]string{"ApplicationID": "app-001", "ApplicationName": "MyApp"},
+	}
 
-	p.OnRequestHeaders(context.Background(), newRequestContext(&policy.AuthContext{
-		Authenticated: true, AuthType: "apikey",
-		Properties: map[string]string{"ApplicationID": "app-001", "ApplicationName": "First Call"},
-	}), params)
-	p.OnRequestHeaders(context.Background(), newRequestContext(&policy.AuthContext{
-		Authenticated: true, AuthType: "apikey",
-		Properties: map[string]string{"ApplicationID": "app-001", "ApplicationName": "Second Call"},
-	}), params)
+	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
+	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 
 	p.tokenMu.RLock()
 	count := len(p.tokenCache)
 	p.tokenMu.RUnlock()
 	if count != 1 {
-		t.Errorf("same ApplicationID must share one cache entry, got %d", count)
+		t.Errorf("identical auth context must share one cache entry, got %d", count)
 	}
 }
 
@@ -938,6 +989,25 @@ func TestTokenCacheKey_NoAuth_SharedEntry(t *testing.T) {
 	p.tokenMu.RUnlock()
 	if count != 1 {
 		t.Errorf("multiple unauthenticated requests must share one cache entry, got %d", count)
+	}
+}
+
+func TestTokenCaching_Disabled_NoCacheEntries(t *testing.T) {
+	// With tokenCaching=false, repeated identical requests must not populate the cache.
+	_, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+	params["tokenCaching"] = false
+	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice", TokenId: "token-xyz"}
+
+	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
+	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
+
+	p.tokenMu.RLock()
+	count := len(p.tokenCache)
+	p.tokenMu.RUnlock()
+	if count != 0 {
+		t.Errorf("tokenCaching=false must not populate the cache, got %d entries", count)
 	}
 }
 
@@ -1251,6 +1321,137 @@ func TestClaimMappings_RestrictedDestinationSkipped(t *testing.T) {
 
 	if claims["sub"] != "alice" {
 		t.Errorf("sub must equal AuthContext.Subject (alice) when claimMapping target is restricted, got %v", claims["sub"])
+	}
+}
+
+// ─── JWT Claims Passthrough Tests ─────────────────────────────────────────────
+
+func TestJWTClaimsPassthrough_PropertiesForwarded(t *testing.T) {
+	// All non-standard JWT claims in Properties must appear in the backend JWT
+	// under their original names when auth type is jwt.
+	rsaKey, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+
+	reqCtx := newRequestContext(&policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "jwt",
+		Subject:       "alice",
+		Properties:    map[string]string{"email": "alice@example.com", "role": "admin", "org": "acme"},
+	})
+
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	mods := result.(policy.UpstreamRequestHeaderModifications)
+	claims := decodeJWT(t, mods.HeadersToSet[defaultHeader], &rsaKey.PublicKey)
+
+	if claims["email"] != "alice@example.com" {
+		t.Errorf("email must be forwarded from Properties, got %v", claims["email"])
+	}
+	if claims["role"] != "admin" {
+		t.Errorf("role must be forwarded from Properties, got %v", claims["role"])
+	}
+	if claims["org"] != "acme" {
+		t.Errorf("org must be forwarded from Properties, got %v", claims["org"])
+	}
+}
+
+func TestJWTClaimsPassthrough_ScopesForwarded(t *testing.T) {
+	// Scopes must be forwarded as a space-delimited "scope" claim.
+	rsaKey, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+
+	reqCtx := newRequestContext(&policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "jwt",
+		Subject:       "alice",
+		Scopes:        map[string]bool{"read": true, "write": true},
+	})
+
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	mods := result.(policy.UpstreamRequestHeaderModifications)
+	claims := decodeJWT(t, mods.HeadersToSet[defaultHeader], &rsaKey.PublicKey)
+
+	scopeVal, ok := claims["scope"]
+	if !ok {
+		t.Fatal("scope claim must be present when AuthContext.Scopes is non-empty")
+	}
+	scopeStr, ok := scopeVal.(string)
+	if !ok {
+		t.Fatalf("scope claim must be a string, got %T", scopeVal)
+	}
+	// Values are sorted, so "read write" is deterministic.
+	if scopeStr != "read write" {
+		t.Errorf("expected scope=\"read write\", got %q", scopeStr)
+	}
+}
+
+func TestJWTClaimsPassthrough_CustomClaimsOverrideProperty(t *testing.T) {
+	// customClaims must override auto-forwarded Properties for the same key.
+	rsaKey, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+	params["customClaims"] = map[string]interface{}{"role": "superadmin"}
+
+	reqCtx := newRequestContext(&policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "jwt",
+		Subject:       "alice",
+		Properties:    map[string]string{"role": "viewer"},
+	})
+
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	mods := result.(policy.UpstreamRequestHeaderModifications)
+	claims := decodeJWT(t, mods.HeadersToSet[defaultHeader], &rsaKey.PublicKey)
+
+	if claims["role"] != "superadmin" {
+		t.Errorf("customClaims must override auto-forwarded Property, got %v", claims["role"])
+	}
+}
+
+func TestJWTClaimsPassthrough_NotForwardedForNonJWTAuth(t *testing.T) {
+	// Properties must NOT be auto-forwarded for non-JWT auth types (e.g. basic).
+	rsaKey, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+
+	reqCtx := newRequestContext(&policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "basic",
+		Subject:       "bob",
+		Properties:    map[string]string{"email": "bob@example.com"},
+	})
+
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	mods := result.(policy.UpstreamRequestHeaderModifications)
+	claims := decodeJWT(t, mods.HeadersToSet[defaultHeader], &rsaKey.PublicKey)
+
+	if _, present := claims["email"]; present {
+		t.Error("Properties must not be auto-forwarded for basic auth; use claimMappings or customClaims instead")
+	}
+}
+
+func TestTokenCacheKey_JWT_DifferentProperties_NoJTI(t *testing.T) {
+	// Without jti, tokens with same identity but different custom claims must produce
+	// separate cache entries (because the backend JWT content differs).
+	_, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{keyCache: make(map[[32]byte]crypto.PrivateKey), pemCache: make(map[string][]byte), tokenCache: make(map[string]cachedToken)}
+	params := baseParams(keyPEM)
+
+	p.OnRequestHeaders(context.Background(), newRequestContext(&policy.AuthContext{
+		Authenticated: true, AuthType: "jwt", Subject: "alice", Issuer: "https://idp.example.com",
+		Properties: map[string]string{"role": "viewer"},
+	}), params)
+	p.OnRequestHeaders(context.Background(), newRequestContext(&policy.AuthContext{
+		Authenticated: true, AuthType: "jwt", Subject: "alice", Issuer: "https://idp.example.com",
+		Properties: map[string]string{"role": "admin"},
+	}), params)
+
+	p.tokenMu.RLock()
+	count := len(p.tokenCache)
+	p.tokenMu.RUnlock()
+	if count != 2 {
+		t.Errorf("same identity but different Properties (no jti) must produce separate cache entries, got %d", count)
 	}
 }
 

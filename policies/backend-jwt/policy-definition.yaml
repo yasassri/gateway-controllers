@@ -98,4 +98,14 @@ systemParameters:
       default: "15m"
       "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.tokenexpiry}"
 
+    tokenCaching:
+      type: boolean
+      description: >-
+        Whether to cache generated tokens. When true (default), tokens are cached for half
+        their expiry duration to avoid repeated signing on every request. Set to false to
+        disable caching — useful for debugging or when dynamic claims must reflect every
+        request without a cache window.
+      default: true
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.tokencaching}"
+
   required: ["signingKey"]

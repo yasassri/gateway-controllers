@@ -6,10 +6,12 @@ Backend services can verify the generated JWT using the gateway's corresponding 
 
 ## How It Works
 
-1. After an auth policy authenticates the request, the gateway's `AuthContext` is populated with the subject, auth type, issuer, audience, and any custom properties.
+1. After an auth policy authenticates the request, the gateway's `AuthContext` is populated with the subject, auth type, issuer, audience, scopes, and any custom properties from the incoming credential.
 2. The Backend JWT policy reads this context, builds a JWT with the configured claims, and signs it with the configured RSA or ECDSA private key.
 3. The signed JWT is set as the value of the configured upstream header (default: `x-jwt-assertion`).
 4. The upstream service verifies the JWT using the matching public key.
+
+When the incoming credential is a JWT (authenticated by `jwt-auth`), all non-standard claims from the original token are automatically forwarded to the backend JWT under their original names. Standard claims (`iss`, `aud`, `sub`, etc.) are handled via their dedicated typed fields (see table below). Scopes are forwarded as a space-delimited `scope` claim. `claimMappings` and `customClaims` can add aliases or override any auto-forwarded claim.
 
 Generated tokens are cached in memory for half their configured `tokenExpiry` (minimum 30 seconds). The cache key is derived from the authenticated client identity, API operation path, and all resolved claim values. Requests from the same client hitting the same operation within the cache window receive the previously signed token, avoiding repeated cryptographic operations. Dynamic custom claims that differ between requests (e.g. `$ctx:request.header.*`) produce separate cache entries, preserving correctness.
 
@@ -27,7 +29,9 @@ If no authentication context is present (no auth policy in the chain), a backend
 | `original_iss` | `AuthContext.Issuer` — the original token issuer (JWT auth only) |
 | `aud` | `AuthContext.Audience` (JWT auth only) |
 | `credential_id` | `AuthContext.CredentialID` (OAuth client_id, API key credential) |
-| _custom_ | Static values from `customClaims` |
+| `scope` | `AuthContext.Scopes` as space-delimited string (JWT auth only) |
+| _all other claims_ | All non-standard claims from the incoming JWT, forwarded under their original names (JWT auth only — see below) |
+| _custom_ | `customClaims` — add new claims or override any of the above |
 
 ## Configuration
 
@@ -111,7 +115,6 @@ policies:
   - name: backend-jwt
     parameters:
       header: x-jwt-assertion
-      requireAuthentication: true
       claimMappings:
         email: email                                 # AuthContext.Properties["email"] → "email"
         clientRole: role                             # AuthContext.Properties["role"] → "clientRole"
