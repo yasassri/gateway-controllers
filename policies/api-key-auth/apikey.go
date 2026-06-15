@@ -19,6 +19,8 @@ package apikey
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -228,6 +230,7 @@ func (p *APIKeyPolicy) authenticate(
 			"ApplicationName": resolvedKey.ApplicationName,
 			"ApplicationID":   resolvedKey.ApplicationID,
 		},
+		TokenId: generateTokenID(providedKey),
 	}
 	if shared.Metadata == nil {
 		shared.Metadata = make(map[string]interface{})
@@ -249,6 +252,11 @@ func (p *APIKeyPolicy) failAuth(shared *policy.SharedContext, statusCode int, er
 		Headers:    v1resp.Headers,
 		Body:       v1resp.Body,
 	}
+}
+
+func generateTokenID(key string) string {
+    h := sha256.Sum256([]byte(key))
+    return hex.EncodeToString(h[:])
 }
 
 // buildErrorResponse constructs the ImmediateResponse body and headers for an auth failure.
