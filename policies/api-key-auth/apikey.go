@@ -19,6 +19,8 @@ package apikey
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -228,6 +230,7 @@ func (p *APIKeyPolicy) authenticate(
 			"ApplicationName": resolvedKey.ApplicationName,
 			"ApplicationID":   resolvedKey.ApplicationID,
 		},
+		TokenId: func() string { h := sha256.Sum256([]byte(providedKey)); return hex.EncodeToString(h[:]) }(),
 	}
 	if shared.Metadata == nil {
 		shared.Metadata = make(map[string]interface{})
