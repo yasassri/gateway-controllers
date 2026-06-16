@@ -27,7 +27,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"os"
 	"sort"
@@ -436,7 +435,8 @@ func buildTokenCacheKey(authCtx *policy.AuthContext, apiName, path, method strin
 		buf.WriteByte('|')
 		buf.WriteString(method)
 		appendExtras(buf, extraKeys, extras)
-		key := fnvHash(buf)
+		sum := sha256.Sum256(buf.Bytes())
+		key := fmt.Sprintf("%x", sum)
 		slog.Debug("Backend JWT: cache key (no-auth)", "apiName", apiName, "path", path, "method", method, "extraClaimKeys", extraKeys, "cacheKey", key)
 		return key
 	}
@@ -480,7 +480,8 @@ func buildTokenCacheKey(authCtx *policy.AuthContext, apiName, path, method strin
 	buf.WriteString(method)
 	appendExtras(buf, extraKeys, extras)
 
-	key := fnvHash(buf)
+	sum := sha256.Sum256(buf.Bytes())
+	key := fmt.Sprintf("%x", sum)
 	slog.Debug("Backend JWT: cache key (identity hash)",
 		"authType", authTypeLabel(authCtx),
 		"apiName", apiName,
@@ -490,12 +491,6 @@ func buildTokenCacheKey(authCtx *policy.AuthContext, apiName, path, method strin
 		"cacheKey", key,
 	)
 	return key
-}
-
-func fnvHash(buf *bytes.Buffer) string {
-	h := fnv.New64a()
-	h.Write(buf.Bytes())
-	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 func appendExtras(buf *bytes.Buffer, keys []string, extras resolvedClaims) {
