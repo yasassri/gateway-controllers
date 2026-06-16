@@ -19,7 +19,6 @@ package backendjwt
 
 import (
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/patrickmn/go-cache"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
@@ -105,9 +105,9 @@ func generateECKey(t *testing.T) (*ecdsa.PrivateKey, string) {
 
 func newTestPolicy() *BackendJWTPolicy {
 	return &BackendJWTPolicy{
-		keyCache:   make(map[[32]byte]crypto.PrivateKey),
-		pemCache:   make(map[string][]byte),
-		tokenCache: make(map[string]cachedToken),
+		keyCache:   cache.New(cache.NoExpiration, 0),
+		pemCache:   cache.New(cache.NoExpiration, 0),
+		tokenCache: cache.New(cache.NoExpiration, 5*time.Minute),
 	}
 }
 
@@ -543,10 +543,7 @@ func TestPEMFileCachedAfterFirstRead(t *testing.T) {
 	reqCtx1 := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "user-a"})
 	p.OnRequestHeaders(context.Background(), reqCtx1, params)
 
-	p.keyMu.RLock()
-	_, cached := p.pemCache[f.Name()]
-	p.keyMu.RUnlock()
-	if !cached {
+	if _, cached := p.pemCache.Get(f.Name()); !cached {
 		t.Fatal("expected PEM bytes to be cached after first path read")
 	}
 
@@ -576,10 +573,7 @@ func TestKeyCaching(t *testing.T) {
 	}
 
 	// Verify only one key is cached.
-	p.keyMu.RLock()
-	count := len(p.keyCache)
-	p.keyMu.RUnlock()
-	if count != 1 {
+	if count := p.keyCache.ItemCount(); count != 1 {
 		t.Errorf("expected 1 cached key, got %d", count)
 	}
 }
@@ -739,9 +733,7 @@ func TestTokenCache_MissOnDifferentPath(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), makeCtx("/orders/v1/orders"), params)
 
 	// Different paths → different cache keys → two separate cache entries.
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 2 {
 		t.Errorf("expected 2 cache entries for 2 different paths, got %d", count)
 	}
@@ -766,9 +758,7 @@ func TestTokenCache_QueryParamsIgnored(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), makeCtx("/api/v1/pets?page=2&limit=10"), params)
 	p.OnRequestHeaders(context.Background(), makeCtx("/api/v1/pets"), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 1 {
 		t.Errorf("different query strings on the same path must share one cache entry, got %d", count)
 	}
@@ -813,14 +803,9 @@ func TestTokenCache_ExpiryRespected(t *testing.T) {
 	p := newTestPolicy()
 
 	p.putCachedToken("key-a", "sentinel-live", time.Hour)
-	p.putCachedToken("key-b", "sentinel-expired", time.Hour)
-
-	// Expire key-b.
-	p.tokenMu.Lock()
-	v := p.tokenCache["key-b"]
-	v.expiresAt = time.Now().Add(-time.Second)
-	p.tokenCache["key-b"] = v
-	p.tokenMu.Unlock()
+	// Store key-b with a tiny TTL, then wait it out so go-cache treats it as expired.
+	p.tokenCache.Set("key-b", "sentinel-expired", time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	got, ok := p.getCachedToken("key-a")
 	if !ok || got != "sentinel-live" {
@@ -835,25 +820,19 @@ func TestTokenCache_ExpiryRespected(t *testing.T) {
 
 func TestTokenCache_EvictExpired(t *testing.T) {
 	p := newTestPolicy()
-	now := time.Now()
 
-	p.tokenMu.Lock()
-	p.tokenCache["expired"] = cachedToken{signed: "old", expiresAt: now.Add(-time.Second)}
-	p.tokenCache["live"] = cachedToken{signed: "current", expiresAt: now.Add(time.Hour)}
-	p.tokenMu.Unlock()
+	// Tiny TTL → expires once we wait; long TTL → stays live.
+	p.tokenCache.Set("expired", "old", time.Millisecond)
+	p.tokenCache.Set("live", "current", time.Hour)
+	time.Sleep(10 * time.Millisecond)
 
-	p.evictExpired()
+	p.tokenCache.DeleteExpired()
 
-	p.tokenMu.RLock()
-	_, hasExpired := p.tokenCache["expired"]
-	_, hasLive := p.tokenCache["live"]
-	p.tokenMu.RUnlock()
-
-	if hasExpired {
-		t.Error("evictExpired must remove entries past their expiresAt")
+	if _, hasExpired := p.tokenCache.Get("expired"); hasExpired {
+		t.Error("DeleteExpired must remove entries past their expiry")
 	}
-	if !hasLive {
-		t.Error("evictExpired must keep entries that have not yet expired")
+	if _, hasLive := p.tokenCache.Get("live"); !hasLive {
+		t.Error("DeleteExpired must keep entries that have not yet expired")
 	}
 }
 
@@ -874,9 +853,7 @@ func TestTokenCacheKey_JWT_JTIRotation(t *testing.T) {
 		TokenId: "token-bbb",
 	}), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 2 {
 		t.Errorf("different jti must produce separate cache entries, got %d", count)
 	}
@@ -894,9 +871,7 @@ func TestTokenCacheKey_JWT_SameJTI_HitsCache(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 1 {
 		t.Errorf("same jti must share one cache entry, got %d", count)
 	}
@@ -921,9 +896,7 @@ func TestTokenCacheKey_JWT_SameJTI_DifferentHeaderMisses(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), makeReqCtx("acme"), params)
 	p.OnRequestHeaders(context.Background(), makeReqCtx("globex"), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 2 {
 		t.Errorf("same jti with different dynamic header values must produce separate cache entries, got %d", count)
 	}
@@ -942,9 +915,7 @@ func TestTokenCacheKey_JWT_CrossIssuerNoJTI(t *testing.T) {
 		Authenticated: true, AuthType: "jwt", Subject: "alice", Issuer: "https://idp-b.example.com",
 	}), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 2 {
 		t.Errorf("same subject from different issuers (no jti) must produce separate cache entries, got %d", count)
 	}
@@ -965,9 +936,7 @@ func TestTokenCacheKey_APIKey_DifferentApplicationID(t *testing.T) {
 		Properties: map[string]string{"ApplicationID": "app-002", "ApplicationName": "App Two"},
 	}), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 2 {
 		t.Errorf("different ApplicationIDs must produce separate cache entries, got %d", count)
 	}
@@ -986,9 +955,7 @@ func TestTokenCacheKey_APIKey_SameApplicationID_HitsCache(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 1 {
 		t.Errorf("identical auth context must share one cache entry, got %d", count)
 	}
@@ -1003,9 +970,7 @@ func TestTokenCacheKey_NoAuth_SharedEntry(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(nil), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(nil), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 1 {
 		t.Errorf("multiple unauthenticated requests must share one cache entry, got %d", count)
 	}
@@ -1022,9 +987,7 @@ func TestTokenCaching_Disabled_NoCacheEntries(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 0 {
 		t.Errorf("tokenCaching=false must not populate the cache, got %d entries", count)
 	}
@@ -1490,9 +1453,7 @@ func TestTokenCacheKey_JWT_DifferentProperties_NoJTI(t *testing.T) {
 		Properties: map[string]string{"role": "admin"},
 	}), params)
 
-	p.tokenMu.RLock()
-	count := len(p.tokenCache)
-	p.tokenMu.RUnlock()
+	count := p.tokenCache.ItemCount()
 	if count != 2 {
 		t.Errorf("same identity but different Properties (no jti) must produce separate cache entries, got %d", count)
 	}

@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/patrickmn/go-cache"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
@@ -44,12 +45,6 @@ const (
 	defaultAlgorithm   = "SHA256withRSA"
 	minCacheTTL        = 30 * time.Second
 )
-
-// cachedToken holds a signed JWT string and its cache expiry time.
-type cachedToken struct {
-	signed    string
-	expiresAt time.Time
-}
 
 // resolvedClaims holds the extra claims derived from customClaims, split by type
 // so the cache key and JWT population can share the same resolved values.
@@ -62,12 +57,9 @@ type resolvedClaims struct {
 // and injects it into the upstream request header. It is designed to run after
 // an authentication policy (e.g. jwt-auth, basic-auth, api-key-auth).
 type BackendJWTPolicy struct {
-	keyMu    sync.RWMutex
-	keyCache map[[32]byte]crypto.PrivateKey
-	pemCache map[string][]byte // path → PEM bytes; avoids repeated file reads per cache miss
-
-	tokenMu    sync.RWMutex
-	tokenCache map[string]cachedToken
+	keyCache   *cache.Cache // hex(sha256 fingerprint) → crypto.PrivateKey; config-lifetime
+	pemCache   *cache.Cache // path → PEM bytes; avoids repeated file reads per cache miss
+	tokenCache *cache.Cache // cache key → signed JWT string; per-item TTL
 }
 
 // algorithmEntry describes a supported JWT signing algorithm.
@@ -85,39 +77,13 @@ var algorithms = map[string]algorithmEntry{
 }
 
 var ins = &BackendJWTPolicy{
-	keyCache:   make(map[[32]byte]crypto.PrivateKey),
-	pemCache:   make(map[string][]byte),
-	tokenCache: make(map[string]cachedToken),
-}
-
-var startCleanup sync.Once
-
-func startCacheCleanupOnce() {
-	startCleanup.Do(func() {
-		go func() {
-			ticker := time.NewTicker(5 * time.Minute)
-			defer ticker.Stop()
-			for range ticker.C {
-				ins.evictExpired()
-			}
-		}()
-	})
-}
-
-func (p *BackendJWTPolicy) evictExpired() {
-	now := time.Now()
-	p.tokenMu.Lock()
-	for k, v := range p.tokenCache {
-		if now.After(v.expiresAt) {
-			delete(p.tokenCache, k)
-		}
-	}
-	p.tokenMu.Unlock()
+	keyCache:   cache.New(cache.NoExpiration, 0),             // config-lifetime; no janitor needed
+	pemCache:   cache.New(cache.NoExpiration, 0),             // config-lifetime; no janitor needed
+	tokenCache: cache.New(cache.NoExpiration, 5*time.Minute), // per-item TTL; janitor evicts every 5m
 }
 
 // GetPolicy is the v1alpha2 factory entry point.
 func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
-	startCacheCleanupOnce()
 	return ins, nil
 }
 
@@ -283,13 +249,10 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 
 // loadKey returns a cached private key, parsing and caching it on first use.
 func (p *BackendJWTPolicy) loadKey(pemBytes []byte) (crypto.PrivateKey, error) {
-	fingerprint := sha256.Sum256(pemBytes)
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256(pemBytes))
 
-	p.keyMu.RLock()
-	key, ok := p.keyCache[fingerprint]
-	p.keyMu.RUnlock()
-	if ok {
-		return key, nil
+	if key, ok := p.keyCache.Get(fingerprint); ok {
+		return key.(crypto.PrivateKey), nil
 	}
 
 	parsed, err := parsePrivateKey(pemBytes)
@@ -297,9 +260,7 @@ func (p *BackendJWTPolicy) loadKey(pemBytes []byte) (crypto.PrivateKey, error) {
 		return nil, err
 	}
 
-	p.keyMu.Lock()
-	p.keyCache[fingerprint] = parsed
-	p.keyMu.Unlock()
+	p.keyCache.Set(fingerprint, parsed, cache.NoExpiration)
 
 	return parsed, nil
 }
@@ -536,14 +497,13 @@ func authTypeLabel(authCtx *policy.AuthContext) string {
 }
 
 // getCachedToken returns a previously signed token if it exists and has not yet expired.
+// Expiry is enforced by go-cache's Get.
 func (p *BackendJWTPolicy) getCachedToken(key string) (string, bool) {
-	p.tokenMu.RLock()
-	entry, ok := p.tokenCache[key]
-	p.tokenMu.RUnlock()
-	if !ok || time.Now().After(entry.expiresAt) {
+	v, ok := p.tokenCache.Get(key)
+	if !ok {
 		return "", false
 	}
-	return entry.signed, true
+	return v.(string), true
 }
 
 // putCachedToken stores a signed token in the cache with a TTL of half the token expiry,
@@ -554,12 +514,7 @@ func (p *BackendJWTPolicy) putCachedToken(key, signed string, tokenExpiry time.D
 	if ttl < minCacheTTL {
 		ttl = minCacheTTL
 	}
-	p.tokenMu.Lock()
-	p.tokenCache[key] = cachedToken{
-		signed:    signed,
-		expiresAt: time.Now().Add(ttl),
-	}
-	p.tokenMu.Unlock()
+	p.tokenCache.Set(key, signed, ttl)
 }
 
 // extractSigningKeyPEM reads PEM bytes from params["signingKey"].inline or params["signingKey"].path.
@@ -589,11 +544,8 @@ func (p *BackendJWTPolicy) extractSigningKeyPEM(params map[string]interface{}) (
 			return nil, fmt.Errorf("signingKey.path must be a non-empty string")
 		}
 
-		p.keyMu.RLock()
-		cached, ok := p.pemCache[path]
-		p.keyMu.RUnlock()
-		if ok {
-			return cached, nil
+		if cached, ok := p.pemCache.Get(path); ok {
+			return cached.([]byte), nil
 		}
 
 		data, err := os.ReadFile(path)
@@ -601,9 +553,7 @@ func (p *BackendJWTPolicy) extractSigningKeyPEM(params map[string]interface{}) (
 			return nil, fmt.Errorf("reading key file %q: %w", path, err)
 		}
 
-		p.keyMu.Lock()
-		p.pemCache[path] = data
-		p.keyMu.Unlock()
+		p.pemCache.Set(path, data, cache.NoExpiration)
 
 		return data, nil
 	}
