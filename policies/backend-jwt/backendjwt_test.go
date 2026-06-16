@@ -426,6 +426,42 @@ func TestInvalidPrivateKey(t *testing.T) {
 }
 
 
+func TestValidate_TokenExpiry_Invalid(t *testing.T) {
+	_, keyPEM := generateRSAKey(t)
+	p := newTestPolicy()
+	err := p.Validate(map[string]interface{}{
+		"signingKey":  map[string]interface{}{"inline": keyPEM},
+		"tokenExpiry": "notaduration",
+	})
+	if err == nil {
+		t.Error("Validate must return error for unparseable tokenExpiry")
+	}
+}
+
+func TestValidate_TokenExpiry_Zero(t *testing.T) {
+	_, keyPEM := generateRSAKey(t)
+	p := newTestPolicy()
+	err := p.Validate(map[string]interface{}{
+		"signingKey":  map[string]interface{}{"inline": keyPEM},
+		"tokenExpiry": "0s",
+	})
+	if err == nil {
+		t.Error("Validate must return error for zero tokenExpiry")
+	}
+}
+
+func TestValidate_TokenExpiry_Negative(t *testing.T) {
+	_, keyPEM := generateRSAKey(t)
+	p := newTestPolicy()
+	err := p.Validate(map[string]interface{}{
+		"signingKey":  map[string]interface{}{"inline": keyPEM},
+		"tokenExpiry": "-5m",
+	})
+	if err == nil {
+		t.Error("Validate must return error for negative tokenExpiry")
+	}
+}
+
 func TestValidate_MissingKey(t *testing.T) {
 	p := newTestPolicy()
 	err := p.Validate(map[string]interface{}{})
@@ -1132,6 +1168,30 @@ func TestContextClaims_AuthProperty(t *testing.T) {
 
 	if claims["clientName"] != "MyService" {
 		t.Errorf("expected clientName=MyService, got %v", claims["clientName"])
+	}
+}
+
+func TestContextClaims_AuthProperty_MixedCaseKey(t *testing.T) {
+	// Properties keys are case-sensitive; the $ctx: prefix must not be lowercased
+	// past the fixed "auth.property." boundary.
+	rsaKey, keyPEM := generateRSAKey(t)
+	p := newTestPolicy()
+	params := baseParams(keyPEM)
+	params["customClaims"] = map[string]interface{}{"role": "$ctx:auth.property.ClientRole"}
+
+	reqCtx := newRequestContext(&policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "jwt",
+		Subject:       "quinn",
+		Properties:    map[string]string{"ClientRole": "admin"},
+	})
+
+	result := p.OnRequestHeaders(context.Background(), reqCtx, params)
+	mods := result.(policy.UpstreamRequestHeaderModifications)
+	claims := decodeJWT(t, mods.HeadersToSet[defaultHeader], &rsaKey.PublicKey)
+
+	if claims["role"] != "admin" {
+		t.Errorf("mixed-case property key: expected role=admin, got %v", claims["role"])
 	}
 }
 

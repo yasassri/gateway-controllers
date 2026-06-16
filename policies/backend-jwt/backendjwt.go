@@ -139,6 +139,17 @@ func (p *BackendJWTPolicy) Validate(params map[string]interface{}) error {
 	if !ok {
 		return fmt.Errorf("unsupported algorithm %q; supported: %s", alg, algorithmList())
 	}
+
+	if s := getString(params, "tokenExpiry", ""); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid tokenExpiry %q: %w", s, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("tokenExpiry must be a positive duration, got %q", s)
+		}
+	}
+
 	if entry.keyType == "none" {
 		return nil
 	}
@@ -700,7 +711,8 @@ func resolveClaimValue(value string, reqCtx *policy.RequestHeaderContext) (strin
 	if !strings.HasPrefix(value, ctxPrefix) {
 		return value, true
 	}
-	variable := strings.ToLower(strings.TrimPrefix(value, ctxPrefix))
+	ref := strings.TrimPrefix(value, ctxPrefix)
+	variable := strings.ToLower(ref)
 
 	switch {
 	case variable == "request.path":
@@ -745,7 +757,8 @@ func resolveClaimValue(value string, reqCtx *policy.RequestHeaderContext) (strin
 		if reqCtx.SharedContext.AuthContext == nil {
 			return "", false
 		}
-		key := strings.TrimPrefix(variable, "auth.property.")
+		// Use the original (non-lowercased) suffix — Properties keys are case-sensitive.
+		key := ref[len("auth.property."):]
 		val, ok := reqCtx.SharedContext.AuthContext.Properties[key]
 		return val, ok
 	default:
