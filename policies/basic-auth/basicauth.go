@@ -134,6 +134,7 @@ func (p *BasicAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.R
 		AuthType:      AuthType,
 		Subject:       providedUsername,
 		Previous:      reqCtx.SharedContext.AuthContext,
+		TokenId:	   providedUsername,
 	}
 	return policy.UpstreamRequestHeaderModifications{}
 }
