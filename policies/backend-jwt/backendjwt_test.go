@@ -25,13 +25,14 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/patrickmn/go-cache"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+	"github.com/wso2/api-platform/sdk/core/utils/cache"
 )
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -105,10 +106,17 @@ func generateECKey(t *testing.T) (*ecdsa.PrivateKey, string) {
 
 func newTestPolicy() *BackendJWTPolicy {
 	return &BackendJWTPolicy{
-		keyCache:   cache.New(cache.NoExpiration, 0),
-		pemCache:   cache.New(cache.NoExpiration, 0),
-		tokenCache: cache.New(cache.NoExpiration, 5*time.Minute),
+		tokenCache:     newTokenCache(defaultCacheMaxSize),
+		currentMaxSize: defaultCacheMaxSize,
 	}
+}
+
+// tokenCount returns the number of entries currently held in the policy's token cache. The SDK
+// cache exposes no key iteration, but every cache-key test uses a dedicated policy instance
+// scoped to a single API (APIName ""), so the global entry count equals the number of distinct
+// tokens cached for that API. The apiName argument is retained for call-site readability.
+func tokenCount(p *BackendJWTPolicy, _ string) int {
+	return p.tokenCache.GetStats().Size
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -124,6 +132,82 @@ func TestGetPolicySingleton(t *testing.T) {
 	}
 	if p1 != p2 {
 		t.Error("GetPolicy must return the same singleton instance")
+	}
+}
+
+func TestGetPolicy_SystemParamsReadFlat(t *testing.T) {
+	// cacheMaxSize is a system parameter: the gateway resolves it from config.toml and
+	// injects it flat into params, at the same level as signingKey and algorithm — not
+	// nested under "systemParameters". GetPolicy applies it to the shared cache's maximum.
+	_, keyPEM := generateRSAKey(t)
+	params := baseParams(keyPEM)
+	params["cacheMaxSize"] = 75
+
+	origMax := ins.currentMaxSize
+	t.Cleanup(func() { ins.ensureTokenCache(origMax) })
+
+	if _, err := GetPolicy(policy.PolicyMetadata{APIName: "param-test-api"}, params); err != nil {
+		t.Fatalf("GetPolicy returned error: %v", err)
+	}
+
+	if max := ins.tokenCache.GetStats().MaxSize; max != 75 {
+		t.Errorf("expected shared cache maximum=75, got %d", max)
+	}
+}
+
+func TestGetPolicy_CacheMaxSizeIsGlobalDefault(t *testing.T) {
+	// cacheMaxSize=0 (or unset) maps to the default global bound rather than unbounded.
+	_, keyPEM := generateRSAKey(t)
+	params := baseParams(keyPEM) // no cacheMaxSize
+
+	origMax := ins.currentMaxSize
+	t.Cleanup(func() { ins.ensureTokenCache(origMax) })
+
+	if _, err := GetPolicy(policy.PolicyMetadata{APIName: "default-size-api"}, params); err != nil {
+		t.Fatalf("GetPolicy returned error: %v", err)
+	}
+
+	if max := ins.tokenCache.GetStats().MaxSize; max != defaultCacheMaxSize {
+		t.Errorf("expected shared cache maximum=%d (default), got %d", defaultCacheMaxSize, max)
+	}
+}
+
+func TestCacheMaxSize_GloballyBounded(t *testing.T) {
+	// The shared cache enforces a single global bound across all APIs: its LRU policy evicts
+	// the least-recently-used entries once full, so the total live entry count never exceeds
+	// the maximum regardless of how many APIs or distinct tokens are generated.
+	const maxSize = 5
+	_, keyPEM := generateRSAKey(t)
+	p := &BackendJWTPolicy{tokenCache: newTokenCache(maxSize), currentMaxSize: maxSize}
+	params := baseParams(keyPEM)
+
+	// Spread distinct tokens across several APIs — the bound is global, not per-API.
+	for _, api := range []string{"api-a", "api-b", "api-c"} {
+		for i := 0; i < 20; i++ {
+			authCtx := &policy.AuthContext{
+				Authenticated: true, AuthType: "jwt", Subject: "user", TokenId: fmt.Sprintf("tok-%d", i),
+			}
+			reqCtx := newRequestContext(authCtx)
+			reqCtx.APIName = api
+			p.OnRequestHeaders(context.Background(), reqCtx, params)
+		}
+	}
+
+	if total := p.tokenCache.GetStats().Size; total > maxSize {
+		t.Errorf("global maximum=%d must cap total entries across all APIs, got %d", maxSize, total)
+	}
+}
+
+func TestTokenCache_PopulatedOnFirstRequest(t *testing.T) {
+	_, keyPEM := generateRSAKey(t)
+	p := newTestPolicy()
+
+	p.OnRequestHeaders(context.Background(), newRequestContext(&policy.AuthContext{
+		Authenticated: true, AuthType: "jwt", Subject: "dave", TokenId: "tok-d",
+	}), baseParams(keyPEM))
+
+	if count := tokenCount(p, ""); count != 1 {
+		t.Errorf("expected 1 cached token after first request, got %d", count)
 	}
 }
 
@@ -540,7 +624,7 @@ func TestPEMFileCachedAfterFirstRead(t *testing.T) {
 	reqCtx1 := newRequestContext(&policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "user-a"})
 	p.OnRequestHeaders(context.Background(), reqCtx1, params)
 
-	if _, cached := p.pemCache.Get(f.Name()); !cached {
+	if _, cached := p.pemCache.Load(f.Name()); !cached {
 		t.Fatal("expected PEM bytes to be cached after first path read")
 	}
 
@@ -570,8 +654,10 @@ func TestKeyCaching(t *testing.T) {
 	}
 
 	// Verify only one key is cached.
-	if count := p.keyCache.ItemCount(); count != 1 {
-		t.Errorf("expected 1 cached key, got %d", count)
+	keyCount := 0
+	p.keyCache.Range(func(_, _ any) bool { keyCount++; return true })
+	if keyCount != 1 {
+		t.Errorf("expected 1 cached key, got %d", keyCount)
 	}
 }
 
@@ -730,7 +816,7 @@ func TestTokenCache_MissOnDifferentPath(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), makeCtx("/orders/v1/orders"), params)
 
 	// Different paths → different cache keys → two separate cache entries.
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 2 {
 		t.Errorf("expected 2 cache entries for 2 different paths, got %d", count)
 	}
@@ -755,7 +841,7 @@ func TestTokenCache_QueryParamsIgnored(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), makeCtx("/api/v1/pets?page=2&limit=10"), params)
 	p.OnRequestHeaders(context.Background(), makeCtx("/api/v1/pets"), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 1 {
 		t.Errorf("different query strings on the same path must share one cache entry, got %d", count)
 	}
@@ -798,42 +884,129 @@ func TestTokenCache_ExpiryRespected(t *testing.T) {
 	// is deterministic — re-signing the same claims in the same second produces the
 	// same token string, making "different string" an unreliable expiry signal.
 	p := newTestPolicy()
+	ctx := context.Background()
 
-	p.putCachedToken("key-a", "sentinel-live", time.Hour)
-	// Store key-b with a tiny TTL, then wait it out so go-cache treats it as expired.
-	p.tokenCache.Set("key-b", "sentinel-expired", time.Millisecond)
+	p.putCachedToken(ctx, "key-a", "sentinel-live", time.Hour)
+	// key-b gets a tiny expiry (ttl → ~1ms), then we wait it out so it is past its window.
+	p.putCachedToken(ctx, "key-b", "sentinel-expired", 2*time.Millisecond)
 	time.Sleep(10 * time.Millisecond)
 
-	got, ok := p.getCachedToken("key-a")
+	got, ok := p.getCachedToken(ctx, "key-a")
 	if !ok || got != "sentinel-live" {
 		t.Errorf("expected cache hit for live entry, got (%q, %v)", got, ok)
 	}
 
-	got, ok = p.getCachedToken("key-b")
+	got, ok = p.getCachedToken(ctx, "key-b")
 	if ok || got != "" {
 		t.Errorf("expected cache miss for expired entry, got (%q, %v)", got, ok)
 	}
 }
 
-func TestTokenCache_EvictExpired(t *testing.T) {
+func TestTokenCache_ExpiredEntryRemovedOnRead(t *testing.T) {
+	// The SDK cache is created with ttl=0, so it never expires entries on its own clock; expiry
+	// is self-managed in getCachedToken, which deletes an entry past its window on read and
+	// reports a miss. After reading both, only the live entry should remain.
 	p := newTestPolicy()
+	ctx := context.Background()
 
-	// Tiny TTL → expires once we wait; long TTL → stays live.
-	p.tokenCache.Set("expired", "old", time.Millisecond)
-	p.tokenCache.Set("live", "current", time.Hour)
+	p.putCachedToken(ctx, "expired", "old", 2*time.Millisecond)
+	p.putCachedToken(ctx, "live", "current", time.Hour)
 	time.Sleep(10 * time.Millisecond)
 
-	p.tokenCache.DeleteExpired()
-
-	if _, hasExpired := p.tokenCache.Get("expired"); hasExpired {
-		t.Error("DeleteExpired must remove entries past their expiry")
+	if _, ok := p.getCachedToken(ctx, "expired"); ok {
+		t.Error("expired entry must be reported as a miss")
 	}
-	if _, hasLive := p.tokenCache.Get("live"); !hasLive {
-		t.Error("DeleteExpired must keep entries that have not yet expired")
+	if got, ok := p.getCachedToken(ctx, "live"); !ok || got != "current" {
+		t.Errorf("live entry must be a hit, got (%q, %v)", got, ok)
+	}
+	if size := p.tokenCache.GetStats().Size; size != 1 {
+		t.Errorf("expired entry must be deleted on read, leaving 1 entry, got %d", size)
+	}
+}
+
+func TestPutCachedToken_TTLNeverOutlivesToken(t *testing.T) {
+	// The cache TTL must always be strictly less than the token's own validity, otherwise
+	// the cache could serve a JWT whose exp has already passed. This must hold even for
+	// short expiries where the minCacheTTL (30s) floor would otherwise dominate.
+	p := newTestPolicy()
+	ctx := context.Background()
+
+	cases := []time.Duration{
+		5 * time.Second,  // half=2.5s; floor must NOT apply (would be 30s > 5s)
+		20 * time.Second, // half=10s;  floor must NOT apply (would be 30s > 20s)
+		30 * time.Second, // half=15s;  floor must NOT apply (30s == expiry is not strictly inside)
+		45 * time.Second, // half=22.5s; floor applies (30s < 45s) → 30s, still inside
+		90 * time.Second, // half=45s;  above the floor entirely
+		15 * time.Minute, // default; well above the floor
+	}
+
+	for _, exp := range cases {
+		p.putCachedToken(ctx, "k", "signed-token", exp)
+		entry, ok := p.tokenCache.Get(ctx, cache.CacheKey{Key: "k"})
+		if !ok {
+			t.Fatalf("expiry=%v: expected a cached entry", exp)
+		}
+		// The entry's remaining lifetime (≈ the configured cache TTL) must stay strictly below
+		// the token's own validity, so a cached token always has a safety margin before its exp.
+		if ttl := time.Until(entry.expiresAt); ttl >= exp {
+			t.Errorf("expiry=%v: cache TTL %v must be strictly less than token validity", exp, ttl)
+		}
+		_ = p.tokenCache.Delete(ctx, cache.CacheKey{Key: "k"})
 	}
 }
 
 // ─── Cache Key Strategy Tests ────────────────────────────────────────────────
+
+func TestTokenCacheKey_StaticClaimsAffectKey(t *testing.T) {
+	// The full configured claim set — including static (non-$ctx) customClaims and claimMappings
+	// destinations — must be folded into the cache key, so an API redeployed with different claim
+	// config never serves a token built from the old config.
+	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice", TokenId: "tok-1"}
+	ns := keyNamespace{apiName: "api", algorithm: "SHA256withRSA"}
+
+	none := buildTokenCacheKey(ns, authCtx, "/api/test", "GET", resolvedClaims{})
+	gold := buildTokenCacheKey(ns, authCtx, "/api/test", "GET", resolvedClaims{stringClaims: map[string]string{"tier": "gold"}})
+	platinum := buildTokenCacheKey(ns, authCtx, "/api/test", "GET", resolvedClaims{stringClaims: map[string]string{"tier": "platinum"}})
+	// A non-string custom claim (rawClaims) must contribute too.
+	raw := buildTokenCacheKey(ns, authCtx, "/api/test", "GET", resolvedClaims{rawClaims: map[string]interface{}{"level": 5}})
+
+	if gold == platinum {
+		t.Error("different static claim values must produce different cache keys")
+	}
+	for name, k := range map[string]string{"gold": gold, "platinum": platinum, "raw": raw} {
+		if k == none {
+			t.Errorf("configuring a static claim (%s) must change the key versus no claims", name)
+		}
+	}
+}
+
+func TestTokenCacheKey_NamespaceFieldsAffectKey(t *testing.T) {
+	// apiName keeps each API's entries isolated; issuer/algorithm/dialect/excludedClaims are the
+	// token-shaping config folded into the key in place of the old generation-counter invalidation.
+	// Changing any one of them on redeploy must yield a different key (a cache miss), so a stale
+	// token built from the old config is never served.
+	authCtx := &policy.AuthContext{Authenticated: true, AuthType: "jwt", Subject: "alice", TokenId: "tok-1"}
+	base := keyNamespace{apiName: "api-a", issuer: "iss-a", algorithm: "SHA256withRSA", dialect: "", excluded: nil}
+	baseKey := buildTokenCacheKey(base, authCtx, "/api/test", "GET", resolvedClaims{})
+
+	variants := map[string]keyNamespace{
+		"apiName":        {apiName: "api-b", issuer: "iss-a", algorithm: "SHA256withRSA"},
+		"issuer":         {apiName: "api-a", issuer: "iss-b", algorithm: "SHA256withRSA"},
+		"algorithm":      {apiName: "api-a", issuer: "iss-a", algorithm: "ES256"},
+		"dialect":        {apiName: "api-a", issuer: "iss-a", algorithm: "SHA256withRSA", dialect: "http://wso2.org/claims/"},
+		"excludedClaims": {apiName: "api-a", issuer: "iss-a", algorithm: "SHA256withRSA", excluded: []string{"role"}},
+	}
+	for field, ns := range variants {
+		if got := buildTokenCacheKey(ns, authCtx, "/api/test", "GET", resolvedClaims{}); got == baseKey {
+			t.Errorf("changing %s must produce a different cache key", field)
+		}
+	}
+
+	// Same namespace + same identity must still hit the same key (no spurious fragmentation).
+	if buildTokenCacheKey(base, authCtx, "/api/test", "GET", resolvedClaims{}) != baseKey {
+		t.Error("identical namespace and identity must produce a stable key")
+	}
+}
 
 func TestTokenCacheKey_JWT_JTIRotation(t *testing.T) {
 	// Different jti on same subject/issuer must produce separate cache entries.
@@ -850,7 +1023,7 @@ func TestTokenCacheKey_JWT_JTIRotation(t *testing.T) {
 		TokenId: "token-bbb",
 	}), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 2 {
 		t.Errorf("different jti must produce separate cache entries, got %d", count)
 	}
@@ -868,7 +1041,7 @@ func TestTokenCacheKey_JWT_SameJTI_HitsCache(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 1 {
 		t.Errorf("same jti must share one cache entry, got %d", count)
 	}
@@ -893,7 +1066,7 @@ func TestTokenCacheKey_JWT_SameJTI_DifferentHeaderMisses(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), makeReqCtx("acme"), params)
 	p.OnRequestHeaders(context.Background(), makeReqCtx("globex"), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 2 {
 		t.Errorf("same jti with different dynamic header values must produce separate cache entries, got %d", count)
 	}
@@ -912,7 +1085,7 @@ func TestTokenCacheKey_JWT_CrossIssuerNoJTI(t *testing.T) {
 		Authenticated: true, AuthType: "jwt", Subject: "alice", Issuer: "https://idp-b.example.com",
 	}), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 2 {
 		t.Errorf("same subject from different issuers (no jti) must produce separate cache entries, got %d", count)
 	}
@@ -933,7 +1106,7 @@ func TestTokenCacheKey_APIKey_DifferentApplicationID(t *testing.T) {
 		Properties: map[string]string{"ApplicationID": "app-002", "ApplicationName": "App Two"},
 	}), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 2 {
 		t.Errorf("different ApplicationIDs must produce separate cache entries, got %d", count)
 	}
@@ -952,7 +1125,7 @@ func TestTokenCacheKey_APIKey_SameApplicationID_HitsCache(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 1 {
 		t.Errorf("identical auth context must share one cache entry, got %d", count)
 	}
@@ -967,7 +1140,7 @@ func TestTokenCacheKey_NoAuth_SharedEntry(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(nil), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(nil), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 1 {
 		t.Errorf("multiple unauthenticated requests must share one cache entry, got %d", count)
 	}
@@ -984,7 +1157,7 @@ func TestTokenCaching_Disabled_NoCacheEntries(t *testing.T) {
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 	p.OnRequestHeaders(context.Background(), newRequestContext(authCtx), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 0 {
 		t.Errorf("tokenCaching=false must not populate the cache, got %d entries", count)
 	}
@@ -1450,7 +1623,7 @@ func TestTokenCacheKey_JWT_DifferentProperties_NoJTI(t *testing.T) {
 		Properties: map[string]string{"role": "admin"},
 	}), params)
 
-	count := p.tokenCache.ItemCount()
+	count := tokenCount(p, "")
 	if count != 2 {
 		t.Errorf("same identity but different Properties (no jti) must produce separate cache entries, got %d", count)
 	}

@@ -29,7 +29,7 @@ parameters:
         Maps upstream JWT claim names to backend JWT claim names. Key is the backend
         JWT claim to set; value is the property key from the authenticated context
         (populated by jwt-auth from the upstream JWT's custom claims). Claims mapped
-        to reserved names (iss, sub, aud, exp, iat) are skipped with a warning.
+        to reserved names (iss, sub, aud, exp, iat, nbf, jti) are skipped with a warning.
         Missing source properties are silently skipped. Values are always strings.
         customClaims take precedence if the same destination key appears in both.
       default: {}
@@ -46,7 +46,7 @@ parameters:
         "$ctx:request.header.x-tenant-id" injects a request header value. See
         documentation for the full list of supported context variables. Non-resolvable
         context references are silently skipped. Non-string values (numbers, booleans)
-        are included as-is. Claims targeting reserved names (iss, sub, aud, exp, iat)
+        are included as-is. Claims targeting reserved names (iss, sub, aud, exp, iat, nbf, jti)
         are skipped with a warning. Runs after claimMappings and takes precedence.
       default: {}
       additionalProperties: {}
@@ -140,5 +140,17 @@ systemParameters:
         request without a cache window.
       default: true
       "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.tokencaching}"
+
+    cacheMaxSize:
+      type: integer
+      description: >-
+        Maximum total number of tokens to hold in the cache across all APIs combined (a single
+        global bound, not per-API). When the limit is reached, the cache evicts the
+        least-recently-used existing entries to make room for new tokens. Set to 0 (default) to use
+        the built-in default bound of 100000. Changing this value rebuilds the shared cache, which
+        flushes all currently cached tokens.
+      default: 0
+      minimum: 0
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.cachemaxsize}"
 
   required: []

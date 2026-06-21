@@ -35,8 +35,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/patrickmn/go-cache"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+	"github.com/wso2/api-platform/sdk/core/utils/cache"
 )
 
 const (
@@ -44,24 +44,71 @@ const (
 	defaultTokenExpiry = 15 * time.Minute
 	defaultAlgorithm   = "SHA256withRSA"
 	minCacheTTL        = 30 * time.Second
+
+	// defaultCacheMaxSize bounds the total number of cached tokens across all APIs when
+	// cacheMaxSize is unset (0). The SDK cache fixes its size at construction, so a changed
+	// cacheMaxSize is applied by rebuilding the cache (see ensureTokenCache).
+	defaultCacheMaxSize = 100_000
 )
 
 // resolvedClaims holds the extra claims derived from customClaims, split by type
 // so the cache key and JWT population can share the same resolved values.
 type resolvedClaims struct {
-	stringClaims       map[string]string      // resolved string customClaims, including $ctx: refs
-	rawClaims          map[string]interface{} // non-string customClaims (numbers, booleans) preserved as-is
-	mappedSources      map[string]bool        // Properties keys consumed by claimMappings; skip in auto-forward
-	dynamicStringClaims map[string]string     // subset of stringClaims resolved from $ctx: refs; used for cache key
+	stringClaims  map[string]string      // resolved string claims: static + $ctx: customClaims and claimMappings destinations
+	rawClaims     map[string]interface{} // non-string customClaims (numbers, booleans) preserved as-is
+	mappedSources map[string]bool        // Properties keys consumed by claimMappings; skip in auto-forward
 }
 
 // BackendJWTPolicy generates a signed JWT from the authenticated user context
 // and injects it into the upstream request header. It is designed to run after
 // an authentication policy (e.g. jwt-auth, basic-auth, api-key-auth).
 type BackendJWTPolicy struct {
-	keyCache   *cache.Cache // hex(sha256 fingerprint) → crypto.PrivateKey; config-lifetime
-	pemCache   *cache.Cache // path → PEM bytes; avoids repeated file reads per cache miss
-	tokenCache *cache.Cache // cache key → signed JWT string; per-item TTL
+	keyCache sync.Map // hex(sha256 fingerprint) → crypto.PrivateKey; config-lifetime, unbounded
+	pemCache sync.Map // path → []byte PEM bytes; config-lifetime, unbounded
+
+	// cacheMu guards the tokenCache pointer and currentMaxSize. The SDK cache fixes its size at
+	// construction (no live resize), so a changed cacheMaxSize is applied by swapping in a new
+	// cache. Reads take the RLock and copy the pointer so an in-flight request keeps using a
+	// consistent cache even if a concurrent deployment rebuilds it.
+	cacheMu        sync.RWMutex
+	tokenCache     *cache.InMemoryCache[cachedToken] // single shared token cache for all APIs; globally bounded by cacheMaxSize
+	currentMaxSize int
+}
+
+// cachedToken is a signed JWT paired with the instant after which it must no longer be served.
+// The SDK cache exposes only a uniform per-cache TTL, but token lifetimes vary per API, so the
+// expiry travels in the value and is enforced on read (see getCachedToken); the cache itself is
+// created with ttl=0 (never expires entries on its own clock).
+type cachedToken struct {
+	signed    string
+	expiresAt time.Time
+}
+
+// newTokenCache builds the shared token cache, globally bounded by maxSize across all APIs.
+// ttl is 0 because expiry is enforced per entry in getCachedToken; once full, the cache's LRU
+// policy evicts the least-recently-used entry across all APIs, enforcing a single global bound.
+func newTokenCache(maxSize int) *cache.InMemoryCache[cachedToken] {
+	return cache.NewInMemoryCache[cachedToken]("backend-jwt-tokens", maxSize, 0, cache.LRUEvictionPolicy)
+}
+
+// keyNamespace carries the per-deployment configuration that shapes the generated token but is
+// not part of the caller identity. Folding it into the cache key makes the key a complete
+// function of the token: a redeploy that changes any of these fields yields a different key
+// (a cache miss), so a stale token built from the old config is never served — no separate
+// invalidation step is needed. apiName keeps each API's entries isolated even when two APIs see
+// identical identity/path/claims but differ in signing config.
+type keyNamespace struct {
+	apiName   string
+	issuer    string
+	algorithm string
+	dialect   string
+	excluded  []string // sorted excludedClaims
+}
+
+// prefix renders the namespace as a deterministic key prefix. excluded is expected pre-sorted.
+func (ns keyNamespace) prefix() string {
+	return ns.apiName + "\x00" + ns.issuer + "\x00" + ns.algorithm + "\x00" +
+		ns.dialect + "\x00" + strings.Join(ns.excluded, ",") + "\x00"
 }
 
 // algorithmEntry describes a supported JWT signing algorithm.
@@ -79,14 +126,54 @@ var algorithms = map[string]algorithmEntry{
 }
 
 var ins = &BackendJWTPolicy{
-	keyCache:   cache.New(cache.NoExpiration, 0),             // config-lifetime; no janitor needed
-	pemCache:   cache.New(cache.NoExpiration, 0),             // config-lifetime; no janitor needed
-	tokenCache: cache.New(cache.NoExpiration, 5*time.Minute), // per-item TTL; janitor evicts every 5m
+	tokenCache:     newTokenCache(defaultCacheMaxSize),
+	currentMaxSize: defaultCacheMaxSize,
 }
 
-// GetPolicy is the v1alpha2 factory entry point.
-func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
+// GetPolicy is the v1alpha2 factory entry point. It is called on each API deployment and applies
+// the global cacheMaxSize from systemParameters to the shared token cache. Redeploy invalidation
+// is handled implicitly by the cache key: it folds in every token-shaping field (identity,
+// operation, claims, issuer, algorithm, dialect, excludedClaims), so a redeploy that changes any
+// of them simply misses the old entries — no explicit flush needed.
+func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
+	// cacheMaxSize is a single global bound across all APIs. 0 (or invalid) means "use the
+	// default bound".
+	maxSize := getInt(params, "cacheMaxSize", 0)
+	if maxSize <= 0 {
+		maxSize = defaultCacheMaxSize
+	}
+	ins.ensureTokenCache(maxSize)
 	return ins, nil
+}
+
+// ensureTokenCache (re)builds the shared token cache when the configured global size changes.
+// The SDK cache fixes its size at construction (there is no live resize), so applying a new
+// cacheMaxSize means replacing the cache, which flushes all entries. This happens only on the
+// first deployment or a genuine cacheMaxSize change — steady-state redeploys leave it untouched
+// and only bump the generation.
+func (p *BackendJWTPolicy) ensureTokenCache(maxSize int) {
+	p.cacheMu.RLock()
+	if p.tokenCache != nil && p.currentMaxSize == maxSize {
+		p.cacheMu.RUnlock()
+		return
+	}
+	p.cacheMu.RUnlock()
+
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	if p.tokenCache != nil && p.currentMaxSize == maxSize {
+		return
+	}
+	p.tokenCache = newTokenCache(maxSize)
+	p.currentMaxSize = maxSize
+}
+
+// currentTokenCache returns the live token cache pointer under the read lock, so callers operate
+// on a consistent instance even if a concurrent deployment rebuilds the cache.
+func (p *BackendJWTPolicy) currentTokenCache() *cache.InMemoryCache[cachedToken] {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	return p.tokenCache
 }
 
 func (p *BackendJWTPolicy) Mode() policy.ProcessingMode {
@@ -154,8 +241,15 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 
 	var cacheKey string
 	if tokenCaching {
-		cacheKey = buildTokenCacheKey(authCtx, reqCtx.APIName, reqCtx.Path, reqCtx.Method, extras)
-		if signed, ok := p.getCachedToken(cacheKey); ok {
+		ns := keyNamespace{
+			apiName:   reqCtx.APIName,
+			issuer:    issuer,
+			algorithm: alg,
+			dialect:   dialect,
+			excluded:  sortedSetKeys(excluded),
+		}
+		cacheKey = buildTokenCacheKey(ns, authCtx, reqCtx.Path, reqCtx.Method, extras)
+		if signed, ok := p.getCachedToken(ctx, cacheKey); ok {
 			slog.Debug("Backend JWT: cache hit", "authType", authTypeLabel(authCtx))
 			return policy.UpstreamRequestHeaderModifications{
 				HeadersToSet: map[string]string{headerName: signed},
@@ -238,7 +332,7 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	}
 
 	if tokenCaching {
-		p.putCachedToken(cacheKey, signed, expiry)
+		p.putCachedToken(ctx, cacheKey, signed, expiry)
 	}
 	slog.Debug("Backend JWT: generated token", "header", headerName, "authType", authTypeLabel(authCtx))
 
@@ -253,7 +347,7 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 func (p *BackendJWTPolicy) loadKey(pemBytes []byte) (crypto.PrivateKey, error) {
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256(pemBytes))
 
-	if key, ok := p.keyCache.Get(fingerprint); ok {
+	if key, ok := p.keyCache.Load(fingerprint); ok {
 		return key.(crypto.PrivateKey), nil
 	}
 
@@ -262,7 +356,7 @@ func (p *BackendJWTPolicy) loadKey(pemBytes []byte) (crypto.PrivateKey, error) {
 		return nil, err
 	}
 
-	p.keyCache.Set(fingerprint, parsed, cache.NoExpiration)
+	p.keyCache.Store(fingerprint, parsed)
 
 	return parsed, nil
 }
@@ -284,10 +378,9 @@ var restrictedClaims = map[string]bool{
 // rawClaims holds non-string customClaims preserved as their original types for JWT population.
 func resolveExtraClaims(reqCtx *policy.RequestHeaderContext, params map[string]interface{}) resolvedClaims {
 	result := resolvedClaims{
-		stringClaims:        make(map[string]string),
-		rawClaims:           make(map[string]interface{}),
-		mappedSources:       make(map[string]bool),
-		dynamicStringClaims: make(map[string]string),
+		stringClaims:  make(map[string]string),
+		rawClaims:     make(map[string]interface{}),
+		mappedSources: make(map[string]bool),
 	}
 
 	authCtx := reqCtx.SharedContext.AuthContext
@@ -336,9 +429,6 @@ func resolveExtraClaims(reqCtx *policy.RequestHeaderContext, params map[string]i
 					continue
 				}
 				result.stringClaims[k] = resolved
-				if strings.HasPrefix(strVal, ctxPrefix) {
-					result.dynamicStringClaims[k] = resolved
-				}
 			}
 		}
 	}
@@ -351,46 +441,47 @@ var keyBufPool = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
 
 // buildTokenCacheKey returns a cache key for the token cache.
 //
-//   - TokenId, no dynamic extras:  raw concatenation — TokenId + apiName + path + method.
-//   - TokenId, with dynamic extras: SHA256 of the above + resolved $ctx: claim values.
-//   - authCtx nil:                  SHA256 of apiName + path + method + dynamic extras.
-//   - otherwise:                    SHA256 of all identity fields + apiName + path + method + dynamic extras.
+//   - TokenId, no claims:    raw concatenation — TokenId + path + method.
+//   - TokenId, with claims:  SHA256 of the above + the configured claim set.
+//   - authCtx nil:           SHA256 of path + method + the configured claim set.
+//   - otherwise:             SHA256 of all identity fields + path + method + the configured claim set.
 //
-// Only $ctx:-resolved customClaims are included in the key because they vary per-request.
-// Static customClaims and claimMappings are constant per-operation config or per-identity
-// (already captured in the identity hash), so they add no information.
-func buildTokenCacheKey(authCtx *policy.AuthContext, apiName, path, method string, extras resolvedClaims) string {
+// The key is a complete function of the token: ns folds in the API namespace plus the
+// token-shaping config that is not part of the caller identity (issuer, algorithm, dialect,
+// excludedClaims), and the full configured claim set is included too — static and $ctx:-resolved
+// customClaims, claimMappings destinations, and non-string custom claims. So redeploying an API
+// with any token-affecting change yields a different key (a cache miss) and never serves a token
+// built from the old config; no separate invalidation step is needed. Per-identity values (e.g.
+// mapped Properties) are already captured by the identity fields, but including the resolved
+// claim names/values also captures destination-name changes.
+func buildTokenCacheKey(ns keyNamespace, authCtx *policy.AuthContext, path, method string, extras resolvedClaims) string {
 	if i := strings.IndexByte(path, '?'); i != -1 {
 		path = path[:i]
 	}
 
-	var extraKeys []string
-	if len(extras.dynamicStringClaims) > 0 {
-		extraKeys = sortedDynamicKeys(extras)
-	}
+	nsPrefix := ns.prefix()
+	claimPairs := keyClaims(extras)
 
 	if authCtx != nil && authCtx.TokenId != "" {
-		if len(extraKeys) == 0 {
-			// Fast path: no extras, no hash needed.
-			key := authCtx.TokenId + "\x00" + apiName + "\x00" + path + "\x00" + method
-			slog.Debug("Backend JWT: cache key (TokenId)", "apiName", apiName, "path", path, "method", method, "cacheKey", key)
+		if len(claimPairs) == 0 {
+			// Fast path: no claims configured, no hash needed.
+			key := nsPrefix + authCtx.TokenId + "\x00" + path + "\x00" + method
+			slog.Debug("Backend JWT: cache key (TokenId)", "path", path, "method", method, "cacheKey", key)
 			return key
 		}
-		// Extras present: SHA256 to normalize key length.
+		// Claims present: SHA256 to normalize key length.
 		buf := keyBufPool.Get().(*bytes.Buffer)
 		buf.Reset()
 		buf.WriteString(authCtx.TokenId)
 		buf.WriteByte('|')
-		buf.WriteString(apiName)
-		buf.WriteByte('|')
 		buf.WriteString(path)
 		buf.WriteByte('|')
 		buf.WriteString(method)
-		appendExtras(buf, extraKeys, extras)
+		appendClaims(buf, claimPairs)
 		sum := sha256.Sum256(buf.Bytes())
 		keyBufPool.Put(buf)
-		key := fmt.Sprintf("%x", sum)
-		slog.Debug("Backend JWT: cache key (TokenId+claims)", "path", path, "method", method, "extraClaimKeys", extraKeys, "cacheKey", key)
+		key := nsPrefix + fmt.Sprintf("%x", sum)
+		slog.Debug("Backend JWT: cache key (TokenId+claims)", "path", path, "method", method, "claims", claimPairs, "cacheKey", key)
 		return key
 	}
 
@@ -399,15 +490,13 @@ func buildTokenCacheKey(authCtx *policy.AuthContext, apiName, path, method strin
 	defer keyBufPool.Put(buf)
 
 	if authCtx == nil {
-		buf.WriteString(apiName)
-		buf.WriteByte('|')
 		buf.WriteString(path)
 		buf.WriteByte('|')
 		buf.WriteString(method)
-		appendExtras(buf, extraKeys, extras)
+		appendClaims(buf, claimPairs)
 		sum := sha256.Sum256(buf.Bytes())
-		key := fmt.Sprintf("%x", sum)
-		slog.Debug("Backend JWT: cache key (no-auth)", "apiName", apiName, "path", path, "method", method, "extraClaimKeys", extraKeys, "cacheKey", key)
+		key := nsPrefix + fmt.Sprintf("%x", sum)
+		slog.Debug("Backend JWT: cache key (no-auth)", "path", path, "method", method, "claims", claimPairs, "cacheKey", key)
 		return key
 	}
 
@@ -443,32 +532,47 @@ func buildTokenCacheKey(authCtx *policy.AuthContext, apiName, path, method strin
 		buf.WriteString(strings.Join(scopeKeys, " "))
 	}
 	buf.WriteByte('|')
-	buf.WriteString(apiName)
-	buf.WriteByte('|')
 	buf.WriteString(path)
 	buf.WriteByte('|')
 	buf.WriteString(method)
-	appendExtras(buf, extraKeys, extras)
+	appendClaims(buf, claimPairs)
 
 	sum := sha256.Sum256(buf.Bytes())
-	key := fmt.Sprintf("%x", sum)
+	key := nsPrefix + fmt.Sprintf("%x", sum)
 	slog.Debug("Backend JWT: cache key (identity hash)",
 		"authType", authTypeLabel(authCtx),
-		"apiName", apiName,
 		"path", path,
 		"method", method,
-		"extraClaimKeys", extraKeys,
+		"claims", claimPairs,
 		"cacheKey", key,
 	)
 	return key
 }
 
-func appendExtras(buf *bytes.Buffer, keys []string, extras resolvedClaims) {
-	for _, k := range keys {
+// keyClaims returns the configured claim contributions to fold into the cache key, as a sorted
+// slice of "name=value" strings covering the full resolved claim set — static and $ctx: custom
+// claims, claimMappings destinations, and non-string custom claims (formatted via fmt). Returns
+// nil when no claims are configured, enabling the no-hash fast path. Sorting the assembled pairs
+// keeps the key deterministic regardless of map iteration order.
+func keyClaims(extras resolvedClaims) []string {
+	if len(extras.stringClaims) == 0 && len(extras.rawClaims) == 0 {
+		return nil
+	}
+	pairs := make([]string, 0, len(extras.stringClaims)+len(extras.rawClaims))
+	for k, v := range extras.stringClaims {
+		pairs = append(pairs, k+"="+v)
+	}
+	for k, v := range extras.rawClaims {
+		pairs = append(pairs, k+"="+fmt.Sprintf("%v", v))
+	}
+	sort.Strings(pairs)
+	return pairs
+}
+
+func appendClaims(buf *bytes.Buffer, pairs []string) {
+	for _, p := range pairs {
 		buf.WriteByte('|')
-		buf.WriteString(k)
-		buf.WriteByte('=')
-		buf.WriteString(extras.dynamicStringClaims[k])
+		buf.WriteString(p)
 	}
 }
 
@@ -479,13 +583,14 @@ func sortedSlice(s []string) []string {
 	return out
 }
 
-func sortedDynamicKeys(extras resolvedClaims) []string {
-	keys := make([]string, 0, len(extras.dynamicStringClaims))
-	for k := range extras.dynamicStringClaims {
-		keys = append(keys, k)
+// sortedSetKeys returns the keys of a string set as a sorted slice, for deterministic key building.
+func sortedSetKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
 	}
-	sort.Strings(keys)
-	return keys
+	sort.Strings(out)
+	return out
 }
 
 func authTypeLabel(authCtx *policy.AuthContext) string {
@@ -495,25 +600,45 @@ func authTypeLabel(authCtx *policy.AuthContext) string {
 	return authCtx.AuthType
 }
 
-// getCachedToken returns a previously signed token if it exists and has not yet expired.
-// Expiry is enforced by go-cache's Get.
-func (p *BackendJWTPolicy) getCachedToken(key string) (string, bool) {
-	v, ok := p.tokenCache.Get(key)
+// getCachedToken returns a previously signed token if it exists and has not yet expired. key is
+// the complete cache key from buildTokenCacheKey (which already folds in the API namespace and
+// token-shaping config). Because the SDK cache never expires entries on its own (ttl=0), expiry
+// is enforced here against the token's stored expiresAt: an entry past its safety window is
+// deleted and reported as a miss, so an expired token is never served.
+func (p *BackendJWTPolicy) getCachedToken(ctx context.Context, key string) (string, bool) {
+	tc := p.currentTokenCache()
+	if tc == nil {
+		return "", false
+	}
+	cacheKey := cache.CacheKey{Key: key}
+	v, ok := tc.Get(ctx, cacheKey)
 	if !ok {
 		return "", false
 	}
-	return v.(string), true
+	if !time.Now().Before(v.expiresAt) {
+		_ = tc.Delete(ctx, cacheKey)
+		return "", false
+	}
+	return v.signed, true
 }
 
-// putCachedToken stores a signed token in the cache with a TTL of half the token expiry,
-// subject to a minimum of minCacheTTL. Using half the expiry avoids serving tokens that
-// are about to expire while still providing a meaningful cache window.
-func (p *BackendJWTPolicy) putCachedToken(key, signed string, tokenExpiry time.Duration) {
+// putCachedToken stores a signed token with a TTL of half the token expiry. Caching for half
+// the validity means a token served from the cache always retains a safety margin before its
+// exp. The minCacheTTL floor widens that window for short-lived tokens, but is applied only
+// when it still fits strictly inside the token's lifetime — the cache TTL must never reach or
+// exceed tokenExpiry, or the cache could serve a JWT whose exp has already passed.
+// key is the complete cache key from buildTokenCacheKey; when the shared cache is full, its LRU
+// policy evicts the least-recently-used entry across all APIs to make room.
+func (p *BackendJWTPolicy) putCachedToken(ctx context.Context, key, signed string, tokenExpiry time.Duration) {
+	tc := p.currentTokenCache()
+	if tc == nil {
+		return
+	}
 	ttl := tokenExpiry / 2
-	if ttl < minCacheTTL {
+	if ttl < minCacheTTL && minCacheTTL < tokenExpiry {
 		ttl = minCacheTTL
 	}
-	p.tokenCache.Set(key, signed, ttl)
+	_ = tc.Set(ctx, cache.CacheKey{Key: key}, cachedToken{signed: signed, expiresAt: time.Now().Add(ttl)})
 }
 
 // extractSigningKeyPEM reads PEM bytes from params["signingKey"].inline or params["signingKey"].path.
@@ -543,7 +668,7 @@ func (p *BackendJWTPolicy) extractSigningKeyPEM(params map[string]interface{}) (
 			return nil, fmt.Errorf("signingKey.path must be a non-empty string")
 		}
 
-		if cached, ok := p.pemCache.Get(path); ok {
+		if cached, ok := p.pemCache.Load(path); ok {
 			return cached.([]byte), nil
 		}
 
@@ -552,7 +677,7 @@ func (p *BackendJWTPolicy) extractSigningKeyPEM(params map[string]interface{}) (
 			return nil, fmt.Errorf("reading key file %q: %w", path, err)
 		}
 
-		p.pemCache.Set(path, data, cache.NoExpiration)
+		p.pemCache.Store(path, data)
 
 		return data, nil
 	}
@@ -628,6 +753,20 @@ func getBool(params map[string]interface{}, key string, defaultVal bool) bool {
 	if v, ok := params[key]; ok {
 		if b, ok := v.(bool); ok {
 			return b
+		}
+	}
+	return defaultVal
+}
+
+func getInt(params map[string]interface{}, key string, defaultVal int) int {
+	if v, ok := params[key]; ok {
+		switch n := v.(type) {
+		case int:
+			return n
+		case int64:
+			return int(n)
+		case float64: // JSON numbers unmarshal as float64
+			return int(n)
 		}
 	}
 	return defaultVal
