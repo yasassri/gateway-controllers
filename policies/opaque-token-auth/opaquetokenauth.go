@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -271,7 +272,7 @@ func (p *OpaqueTokenAuthPolicy) introspect(ctx context.Context, token string, pr
 		return nil, fmt.Errorf("invalid introspection retry count: %d", retryCount)
 	}
 
-	cacheKey := cache.CacheKey{Key: introspectionCacheKey(provider.URI, token)}
+	cacheKey := cache.CacheKey{Key: introspectionCacheKey(provider, token)}
 
 	// The SDK cache has no TTL of its own; each entry carries its own expiresAt
 	// (bounded by the token's exp), so a stale hit is treated as a miss.
@@ -299,7 +300,11 @@ func (p *OpaqueTokenAuthPolicy) introspect(ctx context.Context, token string, pr
 		}
 		lastErr = err
 		if attempt < retryCount {
-			time.Sleep(retryInterval)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(retryInterval):
+			}
 		}
 	}
 
@@ -598,11 +603,18 @@ func buildTLSConfig(certPath string, skipTlsVerify bool) (*tls.Config, error) {
 	return cfg, nil
 }
 
-// introspectionCacheKey returns a hex SHA-256 of the provider URI and token so
-// raw tokens are never held as map keys and results never cross providers.
-func introspectionCacheKey(uri, token string) string {
+// introspectionCacheKey returns a hex SHA-256 keyed on the provider identity
+// (URI + auth style + client id + bearer token) and the raw token, so cached
+// results cannot cross providers that share a URI but differ in credentials.
+func introspectionCacheKey(provider *IntrospectionProvider, token string) string {
 	h := sha256.New()
-	h.Write([]byte(uri))
+	h.Write([]byte(provider.URI))
+	h.Write([]byte{0})
+	h.Write([]byte(provider.AuthStyle))
+	h.Write([]byte{0})
+	h.Write([]byte(provider.ClientID))
+	h.Write([]byte{0})
+	h.Write([]byte(provider.BearerToken))
 	h.Write([]byte{0})
 	h.Write([]byte(token))
 	return hex.EncodeToString(h.Sum(nil))
@@ -819,7 +831,7 @@ func claimValueToString(v interface{}) string {
 	case string:
 		return val
 	case float64:
-		return fmt.Sprintf("%v", int64(val))
+		return strconv.FormatFloat(val, 'f', -1, 64)
 	case bool:
 		return fmt.Sprintf("%v", val)
 	default:

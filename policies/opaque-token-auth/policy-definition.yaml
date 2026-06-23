@@ -56,6 +56,8 @@ parameters:
       default: {}
       additionalProperties:
         type: string
+        minLength: 1
+        pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
 
     authHeaderPrefix:
       type: string
@@ -207,12 +209,14 @@ systemParameters:
 
     onFailureStatusCode:
       type: integer
+      enum: [401, 403]
       description: HTTP status code to return on authentication failure (401 for Unauthorized, 403 for Forbidden).
       default: 401
       "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.onfailurestatuscode}"
 
     errorMessageFormat:
       type: string
+      enum: ["json", "plain", "minimal"]
       description: Format of the error response on validation failure. Supported values are "json", "plain", or "minimal".
       default: json
       "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.errormessageformat}"
