@@ -146,11 +146,10 @@ systemParameters:
       description: >-
         Maximum total number of tokens to hold in the cache across all APIs combined (a single
         global bound, not per-API). When the limit is reached, the cache evicts the
-        least-recently-used existing entries to make room for new tokens. Set to 0 (default) to use
-        the built-in default bound of 100000. Changing this value rebuilds the shared cache, which
-        flushes all currently cached tokens.
-      default: 0
-      minimum: 0
+        least-recently-used existing entries to make room for new tokens. Changing this value rebuilds the shared cache, which flushes all
+        currently cached tokens.
+      default: 100000
+      minimum: 1
       "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.cachemaxsize}"
 
   required: []

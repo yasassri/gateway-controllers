@@ -45,9 +45,9 @@ const (
 	defaultAlgorithm   = "SHA256withRSA"
 	minCacheTTL        = 30 * time.Second
 
-	// defaultCacheMaxSize bounds the total number of cached tokens across all APIs when
-	// cacheMaxSize is unset (0). The SDK cache fixes its size at construction, so a changed
-	// cacheMaxSize is applied by rebuilding the cache (see ensureTokenCache).
+	// defaultCacheMaxSize bounds the total number of cached tokens across all APIs. 
+	// The SDK cache fixes its size at construction, so a changed cacheMaxSize is
+	// applied by rebuilding the cache (see ensureTokenCache).
 	defaultCacheMaxSize = 100_000
 )
 
@@ -87,8 +87,11 @@ type cachedToken struct {
 // newTokenCache builds the shared token cache, globally bounded by maxSize across all APIs.
 // ttl is 0 because expiry is enforced per entry in getCachedToken; once full, the cache's LRU
 // policy evicts the least-recently-used entry across all APIs, enforcing a single global bound.
+// The cache is given the policy's default slog logger so its own debug lines flow through the
+// same logging pipeline; slog gates them by level, so they appear only when debug logging is
+// enabled (pass nil instead to force them off regardless of level).
 func newTokenCache(maxSize int) *cache.InMemoryCache[cachedToken] {
-	return cache.NewInMemoryCache[cachedToken]("backend-jwt-tokens", maxSize, 0, cache.LRUEvictionPolicy)
+	return cache.NewInMemoryCache[cachedToken]("backend-jwt-tokens", maxSize, 0, cache.LRUEvictionPolicy, slog.Default())
 }
 
 // keyNamespace carries the per-deployment configuration that shapes the generated token but is
@@ -136,9 +139,9 @@ var ins = &BackendJWTPolicy{
 // operation, claims, issuer, algorithm, dialect, excludedClaims), so a redeploy that changes any
 // of them simply misses the old entries — no explicit flush needed.
 func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
-	// cacheMaxSize is a single global bound across all APIs. 0 (or invalid) means "use the
-	// default bound".
-	maxSize := getInt(params, "cacheMaxSize", 0)
+	// cacheMaxSize is a single global bound across all APIs; there is no unbounded mode. A missing
+	// or invalid value falls back to the default bound.
+	maxSize := getInt(params, "cacheMaxSize", defaultCacheMaxSize)
 	if maxSize <= 0 {
 		maxSize = defaultCacheMaxSize
 	}
