@@ -207,6 +207,197 @@ func TestJWTAuthPolicy_ForwardTokenFalse(t *testing.T) {
 	}
 }
 
+// TestJWTAuthPolicy_ForwardTokenValue verifies that when forwardTokenValue is true,
+// the bare token value (scheme prefix stripped) is forwarded under forwardedTokenHeader.
+func TestJWTAuthPolicy_ForwardTokenValue(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user123",
+		"iss": "https://issuer.example.com",
+		"aud": "api-audience",
+	})
+
+	ctx := createMockRequestHeaderContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":           "Authorization",
+		"authHeaderScheme":     "Bearer",
+		"onFailureStatusCode":  401,
+		"errorMessageFormat":   "json",
+		"leeway":               "30s",
+		"allowedAlgorithms":    []interface{}{"RS256", "ES256"},
+		"forwardTokenValue":    true,
+		"forwardedTokenHeader": "X-My-Token",
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name":   "test-issuer",
+				"issuer": "https://issuer.example.com",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+		"audiences": []interface{}{"api-audience"},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params)
+
+	modifications, ok := action.(policy.UpstreamRequestHeaderModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestHeaderModifications, got %T", action)
+	}
+
+	// The forwarded header must carry the bare token, without the "Bearer " prefix.
+	got := modifications.HeadersToSet["X-My-Token"]
+	if got != token {
+		t.Errorf("Expected X-My-Token to be the bare token %q, got %q", token, got)
+	}
+	if strings.Contains(got, "Bearer") {
+		t.Errorf("Expected X-My-Token to not contain the scheme prefix, got %q", got)
+	}
+
+	// The original Authorization header must be removed (renamed).
+	foundRemoved := false
+	for _, h := range modifications.HeadersToRemove {
+		if strings.EqualFold(h, "Authorization") {
+			foundRemoved = true
+			break
+		}
+	}
+	if !foundRemoved {
+		t.Errorf("Expected Authorization header to be removed, HeadersToRemove=%v", modifications.HeadersToRemove)
+	}
+}
+
+// TestJWTAuthPolicy_ForwardTokenValueSameHeader verifies that when forwardTokenValue is
+// true and the forwarded header equals the source header, the header is overwritten
+// in place with the prefix-stripped value (not removed).
+func TestJWTAuthPolicy_ForwardTokenValueSameHeader(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user123",
+		"iss": "https://issuer.example.com",
+		"aud": "api-audience",
+	})
+
+	ctx := createMockRequestHeaderContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":           "Authorization",
+		"authHeaderScheme":     "Bearer",
+		"leeway":               "30s",
+		"allowedAlgorithms":    []interface{}{"RS256", "ES256"},
+		"forwardTokenValue":    true,
+		"forwardedTokenHeader": "Authorization",
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name":   "test-issuer",
+				"issuer": "https://issuer.example.com",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+		"audiences": []interface{}{"api-audience"},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params)
+
+	modifications, ok := action.(policy.UpstreamRequestHeaderModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestHeaderModifications, got %T", action)
+	}
+
+	if got := modifications.HeadersToSet["Authorization"]; got != token {
+		t.Errorf("Expected Authorization to be overwritten with bare token %q, got %q", token, got)
+	}
+	for _, h := range modifications.HeadersToRemove {
+		if strings.EqualFold(h, "Authorization") {
+			t.Errorf("Did not expect Authorization to be removed when forwarded under the same name, HeadersToRemove=%v", modifications.HeadersToRemove)
+		}
+	}
+}
+
+// TestJWTAuthPolicy_ForwardTokenValueDefaultOff verifies that with forwardTokenValue
+// unset (default false), the full header value (including prefix) is forwarded.
+func TestJWTAuthPolicy_ForwardTokenValueDefaultOff(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user123",
+		"iss": "https://issuer.example.com",
+		"aud": "api-audience",
+	})
+
+	ctx := createMockRequestHeaderContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":           "Authorization",
+		"authHeaderScheme":     "Bearer",
+		"leeway":               "30s",
+		"allowedAlgorithms":    []interface{}{"RS256", "ES256"},
+		"forwardedTokenHeader": "X-My-Token",
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name":   "test-issuer",
+				"issuer": "https://issuer.example.com",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+		"audiences": []interface{}{"api-audience"},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params)
+
+	modifications, ok := action.(policy.UpstreamRequestHeaderModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestHeaderModifications, got %T", action)
+	}
+
+	// Default behavior forwards the full header value, including the scheme prefix.
+	want := fmt.Sprintf("Bearer %s", token)
+	if got := modifications.HeadersToSet["X-My-Token"]; got != want {
+		t.Errorf("Expected X-My-Token to be the full header value %q, got %q", want, got)
+	}
+}
+
 // TestJWTAuthPolicy_MissingToken tests authentication failure when Authorization header is missing
 func TestJWTAuthPolicy_MissingToken(t *testing.T) {
 	// Create request context without Authorization header

@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v1.0.5
+version: v1.0.6
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
@@ -90,9 +90,22 @@ parameters:
       description: >-
         The header name used to forward the JWT to the upstream service when
         `forwardToken` is true. If this differs from `headerName`, the original
-        header is removed and the token is forwarded under this name instead.
-        Has no effect when `forwardToken` is false.
+        header is removed and the token is forwarded under this name instead. By
+        default the full Authorization header value (including the scheme prefix)
+        is forwarded; set `forwardTokenValue` to true to forward only the bare
+        token value. Has no effect when `forwardToken` is false.
       default: x-forwarded-authorization
+
+    forwardTokenValue:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Controls what is forwarded under `forwardedTokenHeader` when
+        `forwardToken` is true. If true, only the bare token value (with the
+        scheme prefix such as "Bearer" stripped) is forwarded. If false (the
+        default), the full Authorization header value including the prefix is
+        forwarded. Has no effect when `forwardToken` is false.
+      default: false
 
 systemParameters:          
   type: object
