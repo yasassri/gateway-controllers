@@ -1,0 +1,235 @@
+name: opaque-token-auth
+version: v1.0.0
+description: |
+  Validates opaque OAuth 2.0 access tokens by calling an authorization server's
+  RFC 7662 token introspection endpoint. The gateway forwards the bearer token to
+  the introspection endpoint, authenticates itself, and admits the request only
+  when the response reports `active: true`. It can then enforce audiences, scopes,
+  and required claims, and propagate identity downstream. Active responses are
+  cached briefly (never beyond the token's `exp`) to reduce load on the
+  authorization server.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    # User-level parameters (per-route assertions / overrides)
+    issuers:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Selects which introspection providers to use by referencing their `name`
+        or `issuer` in `system.introspectionProviders`. If omitted, providers are
+        tried in order until one reports the token active.
+      default: []
+      items:
+        type: string
+
+    audiences:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: Accepted audience values. Validation succeeds only when at least one configured audience is present in the introspection response `aud`.
+      default: []
+      items:
+        type: string
+
+    requiredScopes:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: At least one of these scopes must be present in the introspection response `scope` or `scp` (OR semantics).
+      default: []
+      items:
+        type: string
+
+    requiredClaims:
+      type: object
+      x-wso2-policy-advanced-param: true
+      description: Required claim-value pairs as `claimName -> expectedValue`, matched against the introspection response.
+      default: {}
+      additionalProperties:
+        type: string
+
+    authHeaderPrefix:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: Route-level authorization scheme prefix (for example, "Bearer") that overrides `system.authHeaderScheme`.
+      default: Bearer
+
+    userIdClaim:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        The introspection response member used to derive the user ID for
+        analytics. Defaults to "sub" when omitted.
+      default: sub
+
+    headerName:
+      type: string
+      x-wso2-policy-advanced-param: true
+      minLength: 1
+      pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+      description: Header name to extract the token from (for example "Authorization"); overrides `system.headerName`.
+      default: Authorization
+
+    forwardToken:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >-
+        If true, the original authorization header (containing the token) is
+        forwarded to the upstream service after successful validation. If false,
+        the header is stripped before the request is proxied.
+      default: true
+
+    forwardedTokenHeader:
+      type: string
+      x-wso2-policy-advanced-param: true
+      minLength: 1
+      pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+      description: >-
+        The header name used to forward the token to the upstream service when
+        `forwardToken` is true. If this differs from `headerName`, the original
+        header is removed and the token is forwarded under this name instead. Has
+        no effect when `forwardToken` is false.
+      default: x-forwarded-authorization
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    # System-level parameters (gateway-wide config)
+    introspectionProviders:
+      type: array
+      description: >-
+        List of authorization server introspection endpoints. Each entry must
+        include a unique `name` and an `introspection` configuration.
+      items:
+        type: object
+        additionalProperties: false
+        required: ["name", "introspection"]
+        properties:
+          name:
+            type: string
+            description: Unique name for this provider (referenced by `user.issuers`).
+          issuer:
+            type: string
+            description: Optional issuer value associated with this provider (also matchable via `user.issuers`).
+          tokenPattern:
+            type: string
+            description: >-
+              Optional regular expression matched against the raw token string.
+              When set, only tokens that match are sent to this provider for
+              introspection. Providers with no pattern match all tokens. Use
+              this to route tokens to the correct authorization server based on
+              their format (e.g. a UUID prefix for one IdP, an "opaque_" prefix
+              for another).
+          introspection:
+            type: object
+            additionalProperties: false
+            required: ["uri"]
+            description: RFC 7662 token introspection endpoint configuration and gateway client authentication.
+            properties:
+              uri:
+                type: string
+                format: uri
+                description: Introspection endpoint URL (e.g., https://idp.example/oauth2/introspect).
+              clientId:
+                type: string
+                description: OAuth2 client id the gateway uses to authenticate to the introspection endpoint.
+              clientSecret:
+                type: string
+                description: OAuth2 client secret paired with `clientId`.
+              authStyle:
+                type: string
+                enum: ["basic", "post"]
+                default: basic
+                description: >-
+                  How client credentials are sent. "basic" uses HTTP Basic auth
+                  (client_secret_basic); "post" sends client_id/client_secret in
+                  the form body (client_secret_post).
+              bearerToken:
+                type: string
+                description: Static bearer token used to authenticate to the introspection endpoint instead of client credentials (RFC 7662 permits a separate access token).
+              tokenTypeHint:
+                type: string
+                default: access_token
+                description: RFC 7662 token_type_hint sent with the introspection request.
+              certificatePath:
+                type: string
+                description: Optional path to a CA certificate file for validating a self-signed introspection endpoint (e.g., /etc/certs/ca.pem).
+              skipTlsVerify:
+                type: boolean
+                default: false
+                description: If true, skip TLS certificate verification for the introspection endpoint. Use with caution, only for testing or trusted internal endpoints.
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.introspectionproviders}"
+
+    introspectionCacheTtl:
+      type: string
+      description: Duration to cache active introspection responses (e.g., "60s"). Cached entries never outlive the token's `exp`.
+      default: "60s"
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.introspectioncachettl}"
+
+    introspectionNegativeCacheTtl:
+      type: string
+      description: Duration to cache inactive (active:false) introspection responses (e.g., "30s"). Set to "0s" to disable. Transport errors and non-200 responses are never negatively cached.
+      default: "30s"
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.introspectionnegativecachettl}"
+
+    introspectionTimeout:
+      type: string
+      description: Timeout for each introspection HTTP request, e.g., "5s".
+      default: "5s"
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.introspectiontimeout}"
+
+    introspectionRetryCount:
+      type: integer
+      description: Number of retries for an introspection request on transient failures.
+      default: 2
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.introspectionretrycount}"
+
+    introspectionRetryInterval:
+      type: string
+      description: Interval between introspection retries, e.g., "1s".
+      default: "1s"
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.introspectionretryinterval}"
+
+    leeway:
+      type: string
+      description: Clock skew allowance for local exp/nbf re-checks, e.g., "30s".
+      default: "30s"
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.leeway}"
+
+    authHeaderScheme:
+      type: string
+      description: Expected scheme prefix in the authorization header (e.g., "Bearer"). If set, the scheme is enforced; if omitted, raw header values are accepted or known schemes stripped.
+      default: Bearer
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.authheaderscheme}"
+
+    headerName:
+      type: string
+      minLength: 1
+      pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+      description: Header name to extract the token from (default "Authorization").
+      default: Authorization
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.headername}"
+
+    onFailureStatusCode:
+      type: integer
+      enum: [401, 403]
+      description: HTTP status code to return on authentication failure (401 for Unauthorized, 403 for Forbidden).
+      default: 401
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.onfailurestatuscode}"
+
+    errorMessageFormat:
+      type: string
+      enum: ["json", "plain", "minimal"]
+      description: Format of the error response on validation failure. Supported values are "json", "plain", or "minimal".
+      default: json
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.errormessageformat}"
+
+    errorMessage:
+      type: string
+      description: Custom error message to include in the response body on authentication failure.
+      default: "Authentication failed"
+      "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.errormessage}"
+
+  required: ["introspectionProviders"]
