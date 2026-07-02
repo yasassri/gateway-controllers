@@ -68,6 +68,51 @@ func TestJWTAuthPolicy_HappyPath_AudienceArray_AndScpArray(t *testing.T) {
 	assertAuthSuccess(t, ctx, action)
 }
 
+func TestJWTAuthPolicy_RequiredScopes_OR_MatchesOne(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	// Token has only "read"; policy requires either "read" or "admin". OR
+	// semantics means one match is enough.
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":   "user-123",
+		"iss":   "https://issuer.example.com",
+		"scope": "read",
+	})
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["requiredScopes"] = []interface{}{"read", "admin"}
+
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthSuccess(t, ctx, action)
+}
+
+func TestJWTAuthPolicy_RequiredScopes_OR_MatchesNone(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	// Token has neither of the required scopes → auth fails.
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":   "user-123",
+		"iss":   "https://issuer.example.com",
+		"scope": "read",
+	})
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["requiredScopes"] = []interface{}{"write", "admin"}
+
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthFailure(t, ctx, action, 401)
+}
+
 func TestJWTAuthPolicy_HappyPath_CustomHeaderName_AndPrefix(t *testing.T) {
 	resetJWTAuthSingletonCache(t)
 

@@ -1477,21 +1477,24 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 			"tokenScopes", scopes,
 			"requiredScopes", userRequiredScopes,
 		)
+		found := false
 		for _, requiredScope := range userRequiredScopes {
-			found := false
 			for _, tokenScope := range scopes {
 				if tokenScope == requiredScope {
 					found = true
 					break
 				}
 			}
-			if !found {
-				slog.Debug("JWT Auth Policy: Required scope not found",
-					"missingScope", requiredScope,
-					"tokenScopes", scopes,
-				)
-				return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("required scope '%s' not found", requiredScope))
+			if found {
+				break
 			}
+		}
+		if !found {
+			slog.Debug("JWT Auth Policy: No required scope found",
+				"requiredScopes", userRequiredScopes,
+				"tokenScopes", scopes,
+			)
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("none of the required scopes %v found", userRequiredScopes))
 		}
 		slog.Debug("JWT Auth Policy: Scope validation passed")
 	}

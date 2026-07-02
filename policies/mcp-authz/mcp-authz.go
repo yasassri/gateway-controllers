@@ -511,7 +511,7 @@ func (p *McpAuthzPolicy) checkClaims(requiredClaims map[string]string, authCtx *
 	return true
 }
 
-// checkScopes verifies that all required scopes are present in the AuthContext
+// checkScopes verifies that at least one of the required scopes is present in the AuthContext
 func (p *McpAuthzPolicy) checkScopes(requiredScopes []string, authCtx *policy.AuthContext) (bool, []string) {
 	found := false
 	var matchedScope string

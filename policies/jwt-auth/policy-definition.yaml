@@ -30,7 +30,7 @@ parameters:
     requiredScopes:
       type: array
       x-wso2-policy-advanced-param: true
-      description: Specifies scopes that must exist in the token from `scope` (space-delimited) or `scp` (array) claims.
+      description: Specifies scopes to check against the token's `scope` (space-delimited) or `scp` (array) claims. At least one of the listed scopes must be present in the token.
       default: []
       items:
         type: string
