@@ -115,7 +115,7 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]any) (policy.Po
 	}
 
 	p.systemParams = make(map[string]any)
-	for _, key := range []string{"algorithm", "backend", "redis", "memory", "headers"} {
+	for _, key := range []string{"algorithm", "backend", "redis", "memory", "local", "headers"} {
 		if v, ok := params[key]; ok {
 			p.systemParams[key] = v
 		}

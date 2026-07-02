@@ -360,7 +360,7 @@ func transformToRatelimitParams(params map[string]interface{}, template map[stri
 		"quotas": quotas,
 	}
 
-	for _, key := range []string{"algorithm", "backend", "redis", "memory"} {
+	for _, key := range []string{"algorithm", "backend", "redis", "memory", "local"} {
 		if val, ok := params[key]; ok {
 			rlParams[key] = val
 		}
