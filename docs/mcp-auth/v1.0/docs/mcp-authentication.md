@@ -32,7 +32,6 @@ Configured by the administrator in `config.toml` under `policy_configurations.mc
 | `jwksFetchTimeout` | string | No | - | jwtauth_v1 | Timeout for HTTP fetch of JWKS (e.g., `"5s"`). |
 | `jwksFetchRetryCount` | integer | No | - | jwtauth_v1 | Number of retries for JWKS fetch on transient failures. |
 | `jwksFetchRetryInterval` | string | No | - | jwtauth_v1 | Interval between JWKS fetch retries (e.g., `"2s"`). |
-| `allowedAlgorithms` | string array | No | - | jwtauth_v1 | Allowed JWT signing algorithms (e.g., `["RS256", "ES256"]`). |
 | `leeway` | string | No | - | jwtauth_v1 | Clock skew allowance for `exp`/`nbf` checks (e.g., `"30s"`). |
 | `authHeaderScheme` | string | No | `"Bearer"` | jwtauth_v1 | Expected scheme prefix in the authorization header. |
 | `headerName` | string | No | `"Authorization"` | jwtauth_v1 | Header name to extract the token from. |
@@ -69,7 +68,6 @@ jwksCacheTtl = "5m"
 jwksFetchTimeout = "5s"
 jwksFetchRetryCount = 3
 jwksFetchRetryInterval = "2s"
-allowedAlgorithms = ["RS256", "ES256"]
 leeway = "30s"
 authHeaderScheme = "Bearer"
 headerName = "Authorization"
