@@ -162,9 +162,17 @@ func (p *APIKeyPolicy) authenticate(
 			"missing or invalid 'in' configuration")
 	}
 
+	var valuePrefix string
+	if valuePrefixRaw, ok := params["value-prefix"]; ok {
+		if vp, ok := valuePrefixRaw.(string); ok {
+			valuePrefix = vp
+		}
+	}
+
 	issuer, _ := params["issuer"].(string)
 
-	slog.Debug("API Key Auth Policy: Configuration loaded", "keyName", keyName, "location", location)
+	slog.Debug("API Key Auth Policy: Configuration loaded",
+		"keyName", keyName, "location", location, "valuePrefix", valuePrefix)
 
 	var providedKey string
 	switch location {
@@ -186,9 +194,19 @@ func (p *APIKeyPolicy) authenticate(
 			"missing or invalid 'in' configuration")
 	}
 
+	if valuePrefix != "" {
+		originalLength := len(providedKey)
+		providedKey = stripPrefix(providedKey, valuePrefix)
+		slog.Debug("API Key Auth Policy: Processed value prefix",
+			"prefix", valuePrefix,
+			"originalLength", originalLength,
+			"processedLength", len(providedKey),
+		)
+	}
+
 	if providedKey == "" {
-		slog.Debug("API Key Auth Policy: No API key found", "location", location, "keyName", keyName)
-		return p.failAuth(shared, 401, "json", "Valid API key required", "missing API key")
+		slog.Debug("API Key Auth Policy: No API key found or API key is malformed", "location", location, "keyName", keyName)
+		return p.failAuth(shared, 401, "json", "Valid API key required", "missing or malformed API key")
 	}
 
 	apiId := shared.APIId
@@ -254,9 +272,19 @@ func (p *APIKeyPolicy) failAuth(shared *policy.SharedContext, statusCode int, er
 	}
 }
 
+// stripPrefix removes the specified prefix from the value (case-insensitive)
+// Returns the value with prefix removed, or empty string if prefix doesn't match
+func stripPrefix(value, prefix string) string {
+	// Do exact case-insensitive prefix matching
+	if len(value) >= len(prefix) && strings.EqualFold(value[:len(prefix)], prefix) {
+		return value[len(prefix):]
+	}
+	return ""
+}
+
 func generateTokenID(key string) string {
-    h := sha256.Sum256([]byte(key))
-    return hex.EncodeToString(h[:])
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
 }
 
 // buildErrorResponse constructs the ImmediateResponse body and headers for an auth failure.

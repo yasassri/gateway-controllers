@@ -1,5 +1,5 @@
 name: api-key-auth
-version: v1.0.4
+version: v1.1.0
 description: |
   Secures APIs by validating API keys in incoming requests. API keys are
   provided through a configured HTTP header.
@@ -28,6 +28,16 @@ parameters:
       default: header
       enum:
         - "header"
+
+    value-prefix:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Optional prefix that should be stripped from the API key value before validation.
+        Case-insensitive matching and removal.
+      validation:
+        minLength: 1
+        maxLength: 128
 
   required:
     - key

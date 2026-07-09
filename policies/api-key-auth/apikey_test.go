@@ -196,6 +196,131 @@ func TestAPIKeyPolicy_OnRequestHeaders_FailsWhenValidationErrors(t *testing.T) {
 	assertUnauthorizedJSON(t, action)
 }
 
+func TestAPIKeyPolicy_OnRequestHeaders_SuccessWithValuePrefix(t *testing.T) {
+	resetAPIKeyStore(t)
+	seedExternalAPIKey(t, "api-1", "header-secret", `["GET /orders"]`)
+
+	p := &APIKeyPolicy{}
+	ctx := newRequestHeaderContext(t, "GET", "/orders", map[string][]string{
+		http.CanonicalHeaderKey("authorization"): {"Bearer header-secret"},
+	}, "api-1", "OrdersAPI", "v1", "/orders")
+
+	action := p.OnRequestHeaders(context.Background(), ctx, map[string]interface{}{
+		"key":          "authorization",
+		"in":           "header",
+		"value-prefix": "Bearer ",
+	})
+
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected AuthContext.Authenticated=true")
+	}
+	if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("expected UpstreamRequestHeaderModifications, got %T", action)
+	}
+}
+
+func TestAPIKeyPolicy_OnRequestHeaders_ValuePrefixIsCaseInsensitive(t *testing.T) {
+	resetAPIKeyStore(t)
+	seedExternalAPIKey(t, "api-1", "header-secret", `["GET /orders"]`)
+
+	p := &APIKeyPolicy{}
+	// Header sends "Bearer " while the configured prefix is "bearer ".
+	ctx := newRequestHeaderContext(t, "GET", "/orders", map[string][]string{
+		http.CanonicalHeaderKey("authorization"): {"Bearer header-secret"},
+	}, "api-1", "OrdersAPI", "v1", "/orders")
+
+	action := p.OnRequestHeaders(context.Background(), ctx, map[string]interface{}{
+		"key":          "authorization",
+		"in":           "header",
+		"value-prefix": "bearer ",
+	})
+
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected AuthContext.Authenticated=true")
+	}
+	if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("expected UpstreamRequestHeaderModifications, got %T", action)
+	}
+}
+
+func TestAPIKeyPolicy_OnRequestHeaders_FailsWhenValuePrefixMissing(t *testing.T) {
+	resetAPIKeyStore(t)
+	seedExternalAPIKey(t, "api-1", "header-secret", `["GET /orders"]`)
+
+	p := &APIKeyPolicy{}
+	// Header value does not carry the configured prefix, so stripping yields
+	// an empty key and the request must be rejected as malformed.
+	ctx := newRequestHeaderContext(t, "GET", "/orders", map[string][]string{
+		http.CanonicalHeaderKey("authorization"): {"header-secret"},
+	}, "api-1", "OrdersAPI", "v1", "/orders")
+
+	action := p.OnRequestHeaders(context.Background(), ctx, map[string]interface{}{
+		"key":          "authorization",
+		"in":           "header",
+		"value-prefix": "Bearer ",
+	})
+
+	assertUnauthorizedJSON(t, action)
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected AuthContext.Authenticated=false")
+	}
+}
+
+func TestStripPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		prefix   string
+		expected string
+	}{
+		{
+			name:     "exact case match",
+			value:    "Bearer secret",
+			prefix:   "Bearer ",
+			expected: "secret",
+		},
+		{
+			name:     "case-insensitive match",
+			value:    "Bearer secret",
+			prefix:   "bearer ",
+			expected: "secret",
+		},
+		{
+			name:     "prefix not present",
+			value:    "secret",
+			prefix:   "Bearer ",
+			expected: "",
+		},
+		{
+			name:     "prefix longer than value",
+			value:    "Bea",
+			prefix:   "Bearer ",
+			expected: "",
+		},
+		{
+			name:     "prefix equals value",
+			value:    "Bearer ",
+			prefix:   "Bearer ",
+			expected: "",
+		},
+		{
+			name:     "mismatch after partial prefix",
+			value:    "Basic secret",
+			prefix:   "Bearer ",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripPrefix(tt.value, tt.prefix)
+			if got != tt.expected {
+				t.Fatalf("unexpected value: got %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestExtractQueryParam(t *testing.T) {
 	tests := []struct {
 		name     string
