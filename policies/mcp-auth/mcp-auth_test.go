@@ -562,6 +562,66 @@ func TestOnRequestBody_Delegation_Success_SetsAuthContextAuthType(t *testing.T) 
 	}
 }
 
+// TestOnRequestBody_RequiredScopes_NotEnforced: requiredScopes are advertise-only, so a token missing them still authenticates. Regression test for wso2/api-platform#2589.
+func TestOnRequestBody_RequiredScopes_NotEnforced(t *testing.T) {
+	privateKey, publicKey := generateRSATestKeys(t)
+	jwksServer := createMcpTestJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	// Token carries only "read" — missing "write" and "admin".
+	token := createMcpTestToken(t, privateKey, map[string]interface{}{
+		"sub":   "user123",
+		"iss":   "https://issuer.example.com",
+		"scope": "read",
+	})
+
+	p := createTestPolicy()
+	p.RequiredScopes = []string{"read", "write", "admin"}
+
+	ctx := createMockRequestBodyContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+	ctx.Method = "POST"
+	ctx.Path = "/mcp"
+	ctx.OperationPath = "/mcp"
+
+	params := map[string]any{
+		"headerName":          "Authorization",
+		"authHeaderScheme":    "Bearer",
+		"onFailureStatusCode": 401,
+		"errorMessageFormat":  "json",
+		"allowedAlgorithms":   []any{"RS256"},
+		// Present in params as at runtime; the policy must strip it before delegating.
+		"requiredScopes": []any{"read", "write", "admin"},
+		"keyManagers": []any{
+			map[string]any{
+				"name":   "test-issuer",
+				"issuer": "https://issuer.example.com",
+				"jwks": map[string]any{
+					"remote": map[string]any{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+	}
+
+	action := p.OnRequestBody(context.Background(), ctx, params)
+
+	// Must NOT be rejected: requiredScopes are advertised, not enforced, by mcp-auth.
+	if _, ok := action.(policy.ImmediateResponse); ok {
+		t.Fatalf("Expected success despite missing scopes (advertise-only), but got auth failure")
+	}
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatal("Expected token to authenticate successfully even though it lacks configured requiredScopes")
+	}
+
+	// The original params map must be left untouched (no in-place deletion).
+	if _, ok := params["requiredScopes"]; !ok {
+		t.Error("Expected params[\"requiredScopes\"] to be preserved; policy must copy, not mutate")
+	}
+}
+
 func createMockRequestBodyContext(headers map[string][]string) *policy.RequestContext {
 	if headers == nil {
 		headers = map[string][]string{}
