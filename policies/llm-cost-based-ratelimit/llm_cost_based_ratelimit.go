@@ -444,6 +444,7 @@ func (p *LLMCostRateLimitPolicy) resolveDelegate(providerName string, params map
 		"backend":         params["backend"],
 		"redis":           params["redis"],
 		"memory":          params["memory"],
+		"local":           params["local"],
 	})
 
 	// Fast path: reuse existing delegate if config hasn't changed.
@@ -637,7 +638,7 @@ func transformToRatelimitParams(params map[string]interface{}) map[string]interf
 	}
 
 	// Copy through system parameters
-	for _, key := range []string{"algorithm", "backend", "redis", "memory"} {
+	for _, key := range []string{"algorithm", "backend", "redis", "memory", "local"} {
 		if val, ok := params[key]; ok {
 			rlParams[key] = val
 		}

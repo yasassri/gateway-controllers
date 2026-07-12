@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -492,8 +493,12 @@ func (p *McpAuthPolicy) handleAuth(ctx context.Context, reqCtx *policy.RequestCo
 		sessionId = sessionIds[0]
 	}
 
+	// requiredScopes are not to be enforced
+	jwtParams := maps.Clone(params)
+	delete(jwtParams, "requiredScopes")
+
 	slog.Debug("MCP Auth Policy: Delegating authentication to JWT Auth Policy")
-	jwtPolicy, err := jwtauth.GetPolicy(policy.PolicyMetadata{}, params)
+	jwtPolicy, err := jwtauth.GetPolicy(policy.PolicyMetadata{}, jwtParams)
 	if err != nil {
 		return p.handleAuthFailure(reqCtx.SharedContext, 500, "json", fmt.Sprintf("jwtauth.GetPolicy unavailable: %s", err))
 	}
@@ -511,7 +516,7 @@ func (p *McpAuthPolicy) handleAuth(ctx context.Context, reqCtx *policy.RequestCo
 		Scheme:        reqCtx.Scheme,
 		Vhost:         reqCtx.Vhost,
 	}
-	headerAction := hrp.OnRequestHeaders(ctx, headerCtx, params)
+	headerAction := hrp.OnRequestHeaders(ctx, headerCtx, jwtParams)
 	if ir, ok := headerAction.(policy.ImmediateResponse); ok {
 		slog.Debug("MCP Auth Policy: Authentication failed in JWT Auth Policy, handling failure")
 		reqCtx.SharedContext.AuthContext = &policy.AuthContext{

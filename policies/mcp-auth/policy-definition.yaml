@@ -1,5 +1,5 @@
 name: mcp-auth
-version: v1.0.3
+version: v1.1.0
 description: |
   Secure Model Context Protocol traffic by validating bearer access tokens for MCP resources using the underlying JWT authentication runtime.
 
@@ -195,13 +195,6 @@ systemParameters:
       type: string
       description: Interval between JWKS fetch retries, e.g., "2s".
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.jwksfetchretryinterval}"
-
-    allowedAlgorithms:
-      type: array
-      description: Allowed JWT signing algorithms (e.g., ["RS256","ES256"]).
-      items:
-        type: string
-      "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.allowedalgorithms}"
 
     leeway:
       type: string

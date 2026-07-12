@@ -14,7 +14,7 @@ The JWT Authentication policy validates JWT access tokens using one or more JWKS
 - Configurable issuer, audience, scope, and claim validation
 - Claim-to-header mappings for downstream services
 - Configurable JWKS cache and retry settings
-- Allowed signing algorithm allowlist
+- Fixed signing algorithm set: RS256, PS256, and ES256 (HMAC and `none` are rejected unconditionally)
 - Authorization header scheme enforcement and clock skew tolerance
 - Customizable error responses
 - Optional `userIdClaim` mapping for analytics
@@ -33,7 +33,6 @@ JWT Authentication requires two levels of configuration.
 | `jwksfetchtimeout` | string | No | `"5s"` | JWKS fetch timeout. |
 | `jwksfetchretrycount` | integer | No | `3` | JWKS fetch retry count. |
 | `jwksfetchretryinterval` | string | No | `"2s"` | JWKS fetch retry interval. |
-| `allowedalgorithms` | array | No | `["RS256", "ES256"]` | Allowed JWT signing algorithms. |
 | `leeway` | string | No | `"30s"` | Clock skew allowance for exp/nbf. |
 | `authheaderscheme` | string | No | `"Bearer"` | Expected authorization scheme prefix. |
 | `headername` | string | No | `"Authorization"` | Header name to extract the token from. |
@@ -64,7 +63,6 @@ jwkscachettl = "5m"
 jwksfetchtimeout = "5s"
 jwksfetchretrycount = 3
 jwksfetchretryinterval = "2s"
-allowedalgorithms = ["RS256", "ES256"]
 leeway = "30s"
 authheaderscheme = "Bearer"
 headername = "Authorization"

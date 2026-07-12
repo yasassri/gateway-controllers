@@ -19,6 +19,10 @@ package jwtauth
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
@@ -51,6 +55,30 @@ var standardJWTClaims = map[string]bool{
 	"scope": true, "scp": true,
 }
 
+// supportedAlgorithms is the fixed, code-enforced allowlist. Asymmetric only.
+// HMAC, none, EdDSA, and any other algorithm are rejected unconditionally.
+var supportedAlgorithms = []string{"RS256", "PS256", "ES256"}
+
+// signatureKeyFunc returns a jwt.Keyfunc that binds the token's signing method to the
+// actual key type. An RSA key may only verify RSA/PSS tokens; an EC key may only verify
+// ECDSA tokens. Any mismatch — including HMAC-confusion attacks — is rejected.
+func signatureKeyFunc(pubKey crypto.PublicKey) jwt.Keyfunc {
+	return func(token *jwt.Token) (interface{}, error) {
+		switch pubKey.(type) {
+		case *rsa.PublicKey:
+			switch token.Method.(type) {
+			case *jwt.SigningMethodRSA, *jwt.SigningMethodRSAPSS:
+				return pubKey, nil
+			}
+		case *ecdsa.PublicKey:
+			if _, ok := token.Method.(*jwt.SigningMethodECDSA); ok {
+				return pubKey, nil
+			}
+		}
+		return nil, fmt.Errorf("signing method %q not permitted for key type %T", token.Header["alg"], pubKey)
+	}
+}
+
 // JwtAuthPolicy implements JWT Authentication with JWKS support
 type JwtAuthPolicy struct {
 	cacheMutex sync.RWMutex
@@ -61,7 +89,7 @@ type JwtAuthPolicy struct {
 
 // CachedJWKS stores cached JWKS data
 type CachedJWKS struct {
-	Keys map[string]*rsa.PublicKey
+	Keys map[string]crypto.PublicKey
 }
 
 // KeyManager represents a key manager with either remote JWKS or local certificate
@@ -89,7 +117,7 @@ type RemoteJWKS struct {
 type LocalCert struct {
 	Inline          string         // Inline PEM-encoded certificate
 	CertificatePath string         // Path to certificate file
-	PublicKey       *rsa.PublicKey // Parsed public key
+	PublicKey       crypto.PublicKey // Parsed public key (RSA or ECDSA)
 }
 
 // JWKSKeySet represents the JWKS response from server
@@ -105,6 +133,9 @@ type JWKSKey struct {
 	N   string `json:"n"`   // RSA modulus
 	E   string `json:"e"`   // RSA exponent
 	Alg string `json:"alg"` // Algorithm
+	Crv string `json:"crv"` // EC curve name (P-256, P-384, P-521)
+	X   string `json:"x"`   // EC x coordinate (base64url)
+	Y   string `json:"y"`   // EC y coordinate (base64url)
 }
 
 var ins = &JwtAuthPolicy{
@@ -134,14 +165,13 @@ func (p *JwtAuthPolicy) Mode() policy.ProcessingMode {
 
 // validateTokenWithSignature validates JWT signature using JWKS
 func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifiedToken *jwt.Token,
-	keyManagers map[string]*KeyManager, userIssuers []string, validateIssuer bool, allowedAlgorithms []string,
+	keyManagers map[string]*KeyManager, userIssuers []string, validateIssuer bool,
 	leeway time.Duration, cacheTTL time.Duration, fetchTimeout time.Duration, retryCount int, retryInterval time.Duration) (jwt.MapClaims, error) {
 
 	slog.Debug("JWT Auth Policy: Starting token signature validation",
 		"keyManagersCount", len(keyManagers),
 		"userIssuersCount", len(userIssuers),
 		"validateIssuer", validateIssuer,
-		"allowedAlgorithms", allowedAlgorithms,
 	)
 
 	unverifiedClaims, ok := unverifiedToken.Claims.(jwt.MapClaims)
@@ -149,36 +179,6 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 		slog.Debug("JWT Auth Policy: Invalid token claims format")
 		return nil, fmt.Errorf("invalid token claims format")
 	}
-
-	// Check allowed algorithms
-	alg, ok := unverifiedToken.Header["alg"].(string)
-	if !ok {
-		slog.Debug("JWT Auth Policy: Missing algorithm in token header")
-		return nil, fmt.Errorf("missing algorithm in token")
-	}
-
-	slog.Debug("JWT Auth Policy: Checking algorithm",
-		"tokenAlgorithm", alg,
-		"allowedAlgorithms", allowedAlgorithms,
-	)
-
-	algorithmAllowed := false
-	for _, allowed := range allowedAlgorithms {
-		if alg == allowed {
-			algorithmAllowed = true
-			break
-		}
-	}
-	if !algorithmAllowed {
-		slog.Debug("JWT Auth Policy: Algorithm not in allowed list",
-			"tokenAlgorithm", alg,
-		)
-		return nil, fmt.Errorf("algorithm '%s' not in allowed list", alg)
-	}
-
-	slog.Debug("JWT Auth Policy: Algorithm check passed",
-		"algorithm", alg,
-	)
 
 	// Validate exp and nbf with leeway
 	now := time.Now()
@@ -360,7 +360,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 		)
 	}
 
-	parser := jwt.NewParser(jwt.WithLeeway(leeway))
+	parser := jwt.NewParser(jwt.WithLeeway(leeway), jwt.WithValidMethods(supportedAlgorithms))
 
 	// Try to verify signature with applicable key managers
 	var lastErr error
@@ -382,9 +382,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 			slog.Debug("JWT Auth Policy: Attempting signature verification with local certificate",
 				"keyManager", km.Name,
 			)
-			verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
-				return km.JWKS.Local.PublicKey, nil
-			})
+			verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, signatureKeyFunc(km.JWKS.Local.PublicKey))
 
 			if err == nil {
 				// Signature verified successfully with local certificate
@@ -445,9 +443,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					"kid", kid,
 				)
 				// Verify signature
-				verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
-					return publicKey, nil
-				})
+				verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, signatureKeyFunc(publicKey))
 
 				if err != nil {
 					slog.Debug("JWT Auth Policy: Signature verification failed",
@@ -475,9 +471,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					slog.Debug("JWT Auth Policy: Trying key from JWKS",
 						"keyId", keyId,
 					)
-					verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
-						return publicKey, nil
-					})
+					verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, signatureKeyFunc(publicKey))
 
 					if err == nil {
 						// Signature verified successfully
@@ -683,9 +677,9 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 		"keysInResponse", len(keySet.Keys),
 	)
 
-	// Convert JWKS keys to RSA public keys
+	// Convert JWKS keys to public keys (RSA and EC supported)
 	cachedJWKS := &CachedJWKS{
-		Keys: make(map[string]*rsa.PublicKey),
+		Keys: make(map[string]crypto.PublicKey),
 	}
 
 	for _, key := range keySet.Keys {
@@ -695,39 +689,54 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 			"alg", key.Alg,
 			"use", key.Use,
 		)
-		if key.Kty != "RSA" {
-			slog.Debug("JWT Auth Policy: Skipping non-RSA key",
-				"kid", key.Kid,
-				"kty", key.Kty,
-			)
-			continue // Only support RSA for now
-		}
 		if key.Kid == "" {
 			slog.Debug("JWT Auth Policy: Skipping key without kid")
 			continue // Skip keys without kid
 		}
 
-		// Parse RSA public key from N and E
-		publicKey, err := parseRSAPublicKey(key.N, key.E)
-		if err != nil {
-			slog.Debug("JWT Auth Policy: Failed to parse RSA public key",
+		if key.Kty == "RSA" {
+			// Parse RSA public key from N and E
+			publicKey, err := parseRSAPublicKey(key.N, key.E)
+			if err != nil {
+				slog.Debug("JWT Auth Policy: Failed to parse RSA public key",
+					"kid", key.Kid,
+					"error", err,
+				)
+				continue // Skip invalid keys
+			}
+			cachedJWKS.Keys[key.Kid] = publicKey
+			slog.Debug("JWT Auth Policy: RSA public key parsed successfully",
 				"kid", key.Kid,
-				"error", err,
 			)
-			continue // Skip invalid keys
+		} else if key.Kty == "EC" {
+			// Parse EC public key from Crv, X, Y
+			publicKey, err := parseECPublicKey(key.Crv, key.X, key.Y)
+			if err != nil {
+				slog.Debug("JWT Auth Policy: Failed to parse EC public key",
+					"kid", key.Kid,
+					"crv", key.Crv,
+					"error", err,
+				)
+				continue // Skip invalid keys
+			}
+			cachedJWKS.Keys[key.Kid] = publicKey
+			slog.Debug("JWT Auth Policy: EC public key parsed successfully",
+				"kid", key.Kid,
+				"crv", key.Crv,
+			)
+		} else {
+			slog.Debug("JWT Auth Policy: Skipping key with unsupported kty",
+				"kid", key.Kid,
+				"kty", key.Kty,
+			)
 		}
-
-		cachedJWKS.Keys[key.Kid] = publicKey
-		slog.Debug("JWT Auth Policy: RSA public key parsed successfully",
-			"kid", key.Kid,
-		)
 	}
 
 	if len(cachedJWKS.Keys) == 0 {
-		slog.Debug("JWT Auth Policy: No valid RSA keys found in JWKS",
+		slog.Debug("JWT Auth Policy: No valid public keys found in JWKS",
 			"uri", remote.URI,
 		)
-		return nil, fmt.Errorf("no valid RSA keys found in JWKS")
+		return nil, fmt.Errorf("no valid public keys found in JWKS")
 	}
 
 	slog.Debug("JWT Auth Policy: JWKS processing complete",
@@ -781,6 +790,53 @@ func parseRSAPublicKey(nStr, eStr string) (*rsa.PublicKey, error) {
 	return &rsa.PublicKey{
 		N: n,
 		E: e,
+	}, nil
+}
+
+// parseECPublicKey parses an EC public key from JWKS curve name and base64url-encoded X/Y coordinates
+func parseECPublicKey(crv, xStr, yStr string) (*ecdsa.PublicKey, error) {
+	var curve elliptic.Curve
+	var ecdhCurve ecdh.Curve
+	switch crv {
+	case "P-256":
+		curve = elliptic.P256()
+		ecdhCurve = ecdh.P256()
+	case "P-384":
+		curve = elliptic.P384()
+		ecdhCurve = ecdh.P384()
+	case "P-521":
+		curve = elliptic.P521()
+		ecdhCurve = ecdh.P521()
+	default:
+		return nil, fmt.Errorf("unsupported EC curve: %q", crv)
+	}
+
+	xBytes, err := decodeBase64URL(xStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode EC x coordinate: %w", err)
+	}
+	yBytes, err := decodeBase64URL(yStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode EC y coordinate: %w", err)
+	}
+
+	// Validate the point is on the curve using crypto/ecdh (uncompressed point: 0x04 || x || y).
+	byteLen := (curve.Params().BitSize + 7) / 8
+	point := make([]byte, 1+2*byteLen)
+	point[0] = 0x04
+	copy(point[1:1+byteLen], xBytes)
+	copy(point[1+byteLen:], yBytes)
+	if _, err := ecdhCurve.NewPublicKey(point); err != nil {
+		return nil, fmt.Errorf("EC point is not on curve %q: %w", crv, err)
+	}
+
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+
+	return &ecdsa.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
 	}, nil
 }
 
@@ -969,8 +1025,8 @@ func claimValueToString(v interface{}) string {
 	}
 }
 
-// getKeyIds returns a slice of key IDs from a map of RSA public keys
-func getKeyIds(keys map[string]*rsa.PublicKey) []string {
+// getKeyIds returns a slice of key IDs from a map of public keys
+func getKeyIds(keys map[string]crypto.PublicKey) []string {
 	ids := make([]string, 0, len(keys))
 	for id := range keys {
 		ids = append(ids, id)
@@ -1018,8 +1074,8 @@ func loadTLSConfig(certPath string) (*tls.Config, error) {
 	}, nil
 }
 
-// loadPublicKeyFromCertificate loads an RSA public key from a certificate file
-func loadPublicKeyFromCertificate(certPath string) (*rsa.PublicKey, error) {
+// loadPublicKeyFromCertificate loads a public key (RSA or ECDSA) from a certificate file
+func loadPublicKeyFromCertificate(certPath string) (crypto.PublicKey, error) {
 	slog.Debug("JWT Auth Policy: loadPublicKeyFromCertificate called",
 		"certPath", certPath,
 	)
@@ -1041,8 +1097,8 @@ func loadPublicKeyFromCertificate(certPath string) (*rsa.PublicKey, error) {
 	return parsePublicKeyFromString(string(certData))
 }
 
-// parsePublicKeyFromString parses an RSA public key from a PEM-encoded string
-func parsePublicKeyFromString(pemData string) (*rsa.PublicKey, error) {
+// parsePublicKeyFromString parses a public key (RSA or ECDSA) from a PEM-encoded string
+func parsePublicKeyFromString(pemData string) (crypto.PublicKey, error) {
 	slog.Debug("JWT Auth Policy: parsePublicKeyFromString called",
 		"dataLength", len(pemData),
 	)
@@ -1064,13 +1120,17 @@ func parsePublicKeyFromString(pemData string) (*rsa.PublicKey, error) {
 			"subject", cert.Subject.String(),
 			"issuer", cert.Issuer.String(),
 		)
-		// Extract public key from certificate
-		if publicKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
+		// Extract public key from certificate (RSA or ECDSA)
+		switch pub := cert.PublicKey.(type) {
+		case *rsa.PublicKey:
 			slog.Debug("JWT Auth Policy: Extracted RSA public key from certificate")
-			return publicKey, nil
+			return pub, nil
+		case *ecdsa.PublicKey:
+			slog.Debug("JWT Auth Policy: Extracted ECDSA public key from certificate")
+			return pub, nil
 		}
-		slog.Debug("JWT Auth Policy: Certificate does not contain RSA public key")
-		return nil, fmt.Errorf("certificate does not contain an RSA public key")
+		slog.Debug("JWT Auth Policy: Certificate does not contain a supported public key type")
+		return nil, fmt.Errorf("certificate does not contain a supported public key (RSA or ECDSA)")
 	}
 
 	slog.Debug("JWT Auth Policy: Not a certificate, trying to parse as public key directly",
@@ -1086,13 +1146,17 @@ func parsePublicKeyFromString(pemData string) (*rsa.PublicKey, error) {
 		return nil, fmt.Errorf("failed to parse public key from certificate data: %w", err)
 	}
 
-	if rsaPublicKey, ok := publicKey.(*rsa.PublicKey); ok {
+	switch pub := publicKey.(type) {
+	case *rsa.PublicKey:
 		slog.Debug("JWT Auth Policy: Parsed PKIX RSA public key successfully")
-		return rsaPublicKey, nil
+		return pub, nil
+	case *ecdsa.PublicKey:
+		slog.Debug("JWT Auth Policy: Parsed PKIX ECDSA public key successfully")
+		return pub, nil
 	}
 
-	slog.Debug("JWT Auth Policy: Parsed key is not RSA")
-	return nil, fmt.Errorf("certificate data does not contain an RSA public key")
+	slog.Debug("JWT Auth Policy: Parsed key is not a supported type")
+	return nil, fmt.Errorf("certificate data does not contain a supported public key (RSA or ECDSA)")
 }
 
 // OnRequestHeaders performs JWT validation in the request header phase.
@@ -1105,7 +1169,6 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	errorMessageFormat := getStringParam(params, "errorMessageFormat", "json")
 	errorMessage := getStringParam(params, "errorMessage", "Authentication failed")
 	leewayStr := getStringParam(params, "leeway", "30s")
-	allowedAlgorithms := getStringArrayParam(params, "allowedAlgorithms", []string{"RS256", "ES256"})
 	jwksCacheTtlStr := getStringParam(params, "jwksCacheTtl", "5m")
 	jwksFetchTimeoutStr := getStringParam(params, "jwksFetchTimeout", "5s")
 	jwksFetchRetryCount := getIntParam(params, "jwksFetchRetryCount", 3)
@@ -1119,7 +1182,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		"errorMessageFormat", errorMessageFormat,
 		"errorMessage", errorMessage,
 		"leeway", leewayStr,
-		"allowedAlgorithms", allowedAlgorithms,
+		"supportedAlgorithms", supportedAlgorithms,
 		"jwksCacheTtl", jwksCacheTtlStr,
 		"jwksFetchTimeout", jwksFetchTimeoutStr,
 		"jwksFetchRetryCount", jwksFetchRetryCount,
@@ -1247,7 +1310,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 
 						if inline != "" || certPath != "" {
 							localCert := &LocalCert{Inline: inline, CertificatePath: certPath}
-							var publicKey *rsa.PublicKey
+							var publicKey crypto.PublicKey
 							var certErr error
 							if inline != "" {
 								slog.Debug("JWT Auth Policy: Parsing inline certificate",
@@ -1373,7 +1436,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	)
 
 	claims, err := p.validateTokenWithSignature(token, unverifiedToken, keyManagers, userIssuers, validateIssuer,
-		allowedAlgorithms, leeway, jwksCacheTtl, jwksFetchTimeout, jwksFetchRetryCount, jwksFetchRetryInterval)
+		leeway, jwksCacheTtl, jwksFetchTimeout, jwksFetchRetryCount, jwksFetchRetryInterval)
 	if err != nil {
 		slog.Debug("JWT Auth Policy: Token validation failed",
 			"error", err,
@@ -1416,21 +1479,24 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 			"tokenScopes", scopes,
 			"requiredScopes", userRequiredScopes,
 		)
+		found := false
 		for _, requiredScope := range userRequiredScopes {
-			found := false
 			for _, tokenScope := range scopes {
 				if tokenScope == requiredScope {
 					found = true
 					break
 				}
 			}
-			if !found {
-				slog.Debug("JWT Auth Policy: Required scope not found",
-					"missingScope", requiredScope,
-					"tokenScopes", scopes,
-				)
-				return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("required scope '%s' not found", requiredScope))
+			if found {
+				break
 			}
+		}
+		if !found {
+			slog.Debug("JWT Auth Policy: No required scope found",
+				"requiredScopes", userRequiredScopes,
+				"tokenScopes", scopes,
+			)
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("none of the required scopes %v found", userRequiredScopes))
 		}
 		slog.Debug("JWT Auth Policy: Scope validation passed")
 	}

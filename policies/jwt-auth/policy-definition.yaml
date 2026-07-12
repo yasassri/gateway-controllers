@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v1.0.6
+version: v1.1.0
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
@@ -30,7 +30,7 @@ parameters:
     requiredScopes:
       type: array
       x-wso2-policy-advanced-param: true
-      description: Specifies scopes that must exist in the token from `scope` (space-delimited) or `scp` (array) claims.
+      description: Specifies scopes to check against the token's `scope` (space-delimited) or `scp` (array) claims. At least one of the listed scopes must be present in the token.
       default: []
       items:
         type: string
@@ -199,14 +199,6 @@ systemParameters:
       description: Interval between JWKS fetch retries, e.g., "2s".
       default: "2s"
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.jwksfetchretryinterval}"
-
-    allowedAlgorithms:
-      type: array
-      description: Allowed JWT signing algorithms (e.g., ["RS256","ES256"]).
-      items:
-        type: string
-      default: ["RS256", "ES256"]
-      "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.allowedalgorithms}"
 
     leeway:
       type: string

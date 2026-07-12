@@ -3,9 +3,12 @@ package jwtauth
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -63,6 +66,51 @@ func TestJWTAuthPolicy_HappyPath_AudienceArray_AndScpArray(t *testing.T) {
 
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
 	assertAuthSuccess(t, ctx, action)
+}
+
+func TestJWTAuthPolicy_RequiredScopes_OR_MatchesOne(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	// Token has only "read"; policy requires either "read" or "admin". OR
+	// semantics means one match is enough.
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":   "user-123",
+		"iss":   "https://issuer.example.com",
+		"scope": "read",
+	})
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["requiredScopes"] = []interface{}{"read", "admin"}
+
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthSuccess(t, ctx, action)
+}
+
+func TestJWTAuthPolicy_RequiredScopes_OR_MatchesNone(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	// Token has neither of the required scopes → auth fails.
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":   "user-123",
+		"iss":   "https://issuer.example.com",
+		"scope": "read",
+	})
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["requiredScopes"] = []interface{}{"write", "admin"}
+
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthFailure(t, ctx, action, 401)
 }
 
 func TestJWTAuthPolicy_HappyPath_CustomHeaderName_AndPrefix(t *testing.T) {
@@ -189,6 +237,9 @@ func TestJWTAuthPolicy_Negative_MissingAlgHeader(t *testing.T) {
 	assertAuthFailure(t, ctx, action, 401)
 }
 
+// TestJWTAuthPolicy_Negative_DisallowedAlgorithm verifies that algorithms outside the
+// hardcoded supported set (RS256, PS256, ES256) are rejected even when a valid key is present.
+// RS384 is chosen as a representative unsupported-but-parseable algorithm.
 func TestJWTAuthPolicy_Negative_DisallowedAlgorithm(t *testing.T) {
 	resetJWTAuthSingletonCache(t)
 
@@ -196,15 +247,20 @@ func TestJWTAuthPolicy_Negative_DisallowedAlgorithm(t *testing.T) {
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
 	defer jwksServer.Close()
 
-	token := createTestToken(t, privateKey, map[string]interface{}{
+	// Mint an RS384 token (not in the hardcoded supportedAlgorithms set).
+	claims := normalizeClaims(map[string]interface{}{
 		"sub": "user-123",
 		"iss": "https://issuer.example.com",
 	})
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS384, jwt.MapClaims(claims))
+	tok.Header["kid"] = "test-kid"
+	tokenString, err := tok.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("failed to sign RS384 token: %v", err)
+	}
 
 	params := newRemoteParams(jwksServer.URL + "/jwks.json")
-	params["allowedAlgorithms"] = []interface{}{"ES256"}
-
-	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", tokenString))
 	assertAuthFailure(t, ctx, action, 401)
 }
 
@@ -469,8 +525,6 @@ func TestJWTAuthPolicy_Security_AlgNoneRejected(t *testing.T) {
 	})
 
 	params := newRemoteParams(jwksServer.URL + "/jwks.json")
-	params["allowedAlgorithms"] = []interface{}{"RS256"}
-
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
 	assertAuthFailure(t, ctx, action, 401)
 }
@@ -837,7 +891,7 @@ func TestJWTAuthPolicy_Regression_claimValueToStringAndGetKeyIds(t *testing.T) {
 
 	key1 := &rsa.PublicKey{N: rsa.PublicKey{}.N, E: 65537}
 	key2 := &rsa.PublicKey{N: rsa.PublicKey{}.N, E: 65537}
-	keys := map[string]*rsa.PublicKey{
+	keys := map[string]crypto.PublicKey{
 		"kid-1": key1,
 		"kid-2": key2,
 	}
@@ -887,7 +941,6 @@ func newRemoteParams(jwksURI string) map[string]interface{} {
 		"errorMessageFormat":     "json",
 		"errorMessage":           "Authentication failed",
 		"leeway":                 "30s",
-		"allowedAlgorithms":      []interface{}{"RS256"},
 		"jwksCacheTtl":           "5m",
 		"jwksFetchTimeout":       "100ms",
 		"jwksFetchRetryCount":    0,
@@ -1008,6 +1061,183 @@ func normalizeClaims(claims map[string]interface{}) map[string]interface{} {
 		claims["iat"] = time.Now().Unix()
 	}
 	return claims
+}
+
+// TestJWTAuthPolicy_Security_HMACConfusionRejected verifies that HS256 tokens are rejected
+// because HS256 is not in the hardcoded supported algorithm set.
+func TestJWTAuthPolicy_Security_HMACConfusionRejected(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	_, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	pubDER, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatalf("failed to marshal public key: %v", err)
+	}
+
+	claims := normalizeClaims(map[string]interface{}{
+		"sub": "user-123",
+		"iss": "https://issuer.example.com",
+	})
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims(claims))
+	tok.Header["kid"] = "test-kid"
+	tokenString, err := tok.SignedString(pubDER)
+	if err != nil {
+		t.Fatalf("failed to sign HS256 token: %v", err)
+	}
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", tokenString))
+	assertAuthFailure(t, ctx, action, 401)
+}
+
+// TestJWTAuthPolicy_Security_PS256Accepted verifies that PS256 (RSASSA-PSS) tokens are accepted
+// when the JWKS contains the corresponding RSA public key.
+func TestJWTAuthPolicy_Security_PS256Accepted(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	claims := normalizeClaims(map[string]interface{}{
+		"sub": "user-123",
+		"iss": "https://issuer.example.com",
+	})
+	tok := jwt.NewWithClaims(jwt.SigningMethodPS256, jwt.MapClaims(claims))
+	tok.Header["kid"] = "test-kid"
+	tokenString, err := tok.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("failed to sign PS256 token: %v", err)
+	}
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", tokenString))
+	assertAuthSuccess(t, ctx, action)
+}
+
+// generateTestECKeys generates a P-256 ECDSA key pair for testing.
+func generateTestECKeys(t *testing.T) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate EC key: %v", err)
+	}
+	return privateKey, &privateKey.PublicKey
+}
+
+// createECJWKSServer creates a test HTTP server that serves a JWKS with a P-256 EC public key.
+func createECJWKSServer(t *testing.T, publicKey *ecdsa.PublicKey, kid string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jwks.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		xB64 := base64.RawURLEncoding.EncodeToString(publicKey.X.Bytes())
+		yB64 := base64.RawURLEncoding.EncodeToString(publicKey.Y.Bytes())
+		jwks := map[string]interface{}{
+			"keys": []map[string]interface{}{
+				{
+					"kty": "EC",
+					"kid": kid,
+					"use": "sig",
+					"alg": "ES256",
+					"crv": "P-256",
+					"x":   xB64,
+					"y":   yB64,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(jwks); err != nil {
+			t.Logf("failed to encode EC JWKS: %v", err)
+		}
+	}))
+	return server
+}
+
+// createES256Token mints an ES256 JWT signed with the given EC private key.
+func createES256Token(t *testing.T, privateKey *ecdsa.PrivateKey, claims map[string]interface{}, kid string) string {
+	t.Helper()
+	claims = normalizeClaims(claims)
+	tok := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims(claims))
+	tok.Header["kid"] = kid
+	tokenString, err := tok.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("failed to sign ES256 token: %v", err)
+	}
+	return tokenString
+}
+
+// TestJWTAuthPolicy_Security_ES256Accepted verifies end-to-end ES256 support:
+// the JWKS parser stores an EC key, the Keyfunc binds it to ECDSA, and the token passes.
+func TestJWTAuthPolicy_Security_ES256Accepted(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	ecPriv, ecPub := generateTestECKeys(t)
+	jwksServer := createECJWKSServer(t, ecPub, "ec-kid")
+	defer jwksServer.Close()
+
+	token := createES256Token(t, ecPriv, map[string]interface{}{
+		"sub": "user-456",
+		"iss": "https://issuer.example.com",
+	}, "ec-kid")
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthSuccess(t, ctx, action)
+}
+
+// TestJWTAuthPolicy_Security_ES256WithRSAKeyRejected verifies that an ES256 token is rejected
+// when the JWKS only contains an RSA key — the Keyfunc must refuse the method/key-type mismatch.
+func TestJWTAuthPolicy_Security_ES256WithRSAKeyRejected(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	// RSA JWKS
+	_, rsaPub := generateTestKeys(t)
+	rsaJWKSServer := createJWKSServer(t, rsaPub, "rsa-kid")
+	defer rsaJWKSServer.Close()
+
+	// EC private key — token claims ES256 but JWKS has RSA
+	ecPriv, _ := generateTestECKeys(t)
+	token := createES256Token(t, ecPriv, map[string]interface{}{
+		"sub": "user-789",
+		"iss": "https://issuer.example.com",
+	}, "rsa-kid") // deliberately uses the RSA kid so key lookup succeeds, Keyfunc must then reject
+
+	params := newRemoteParams(rsaJWKSServer.URL + "/jwks.json")
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthFailure(t, ctx, action, 401)
+}
+
+// TestJWTAuthPolicy_Security_UnsupportedAlgRejected verifies that algorithms outside the fixed
+// set (RS256, PS256, ES256) are rejected by WithValidMethods before the Keyfunc is reached.
+// RS384 is used: the JWKS key material matches the token's key, so the only reason for
+// rejection is that RS384 is not in supportedAlgorithms.
+func TestJWTAuthPolicy_Security_UnsupportedAlgRejected(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	claims := normalizeClaims(map[string]interface{}{
+		"sub": "user-123",
+		"iss": "https://issuer.example.com",
+	})
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS384, jwt.MapClaims(claims))
+	tok.Header["kid"] = "test-kid"
+	tokenString, err := tok.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("failed to sign RS384 token: %v", err)
+	}
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", tokenString))
+	assertAuthFailure(t, ctx, action, 401)
 }
 
 func writeJWKSResponse(t *testing.T, w http.ResponseWriter, publicKey *rsa.PublicKey, kid string) {

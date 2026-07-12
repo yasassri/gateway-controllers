@@ -47,7 +47,7 @@ parameters:
           requiredScopes:
             type: array
             x-wso2-policy-advanced-param: false
-            description: Require OAuth scopes for this rule; every listed scope must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
+            description: Require OAuth scopes for this rule; at least one of the listed scopes must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
             default: []
             items:
               type: string
@@ -94,7 +94,7 @@ parameters:
           requiredScopes:
             type: array
             x-wso2-policy-advanced-param: false
-            description: Require OAuth scopes for this rule; every listed scope must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
+            description: Require OAuth scopes for this rule; at least one of the listed scopes must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
             default: []
             items:
               type: string
@@ -141,7 +141,7 @@ parameters:
           requiredScopes:
             type: array
             x-wso2-policy-advanced-param: false
-            description: Require OAuth scopes for this rule; every listed scope must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
+            description: Require OAuth scopes for this rule; at least one of the listed scopes must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
             default: []
             items:
               type: string
@@ -188,7 +188,7 @@ parameters:
           requiredScopes:
             type: array
             x-wso2-policy-advanced-param: false
-            description: Require OAuth scopes for this rule; every listed scope must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
+            description: Require OAuth scopes for this rule; at least one of the listed scopes must exist in token `scope` or `scp`, and if claims are also set, both scopes and claims must pass.
             default: []
             items:
               type: string

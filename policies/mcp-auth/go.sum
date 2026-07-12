@@ -1,6 +1,6 @@
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
-github.com/wso2/api-platform/sdk/core v0.2.4 h1:dwwe7QROmf1HIeCqhfiv82/34n6oAe2b0hazYljpPS0=
-github.com/wso2/api-platform/sdk/core v0.2.4/go.mod h1:vgNVzR16g9k5cun3VXZ7wDg8UGbPxsVU2TW8EbRCv0o=
-github.com/wso2/gateway-controllers/policies/jwt-auth v1.0.1 h1:L1blzbpfmFhsQMfRVU5m0TdLEM+wjpCXbJgLrvfikYQ=
-github.com/wso2/gateway-controllers/policies/jwt-auth v1.0.1/go.mod h1:FEyeLDfbVAli6b3MueYRMnVvZXwtcZXw3JI2FCAIZdI=
+github.com/wso2/api-platform/sdk/core v0.2.14 h1:z3LgbgOBeXGoJ891YqrpbpLfgYHZIm4Asj4o3IP5wI4=
+github.com/wso2/api-platform/sdk/core v0.2.14/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
+github.com/wso2/gateway-controllers/policies/jwt-auth v1.1.0 h1:8NDu++azRvqf0rO5uYN5HlgvuQG47gAWJFuz7XGYrBQ=
+github.com/wso2/gateway-controllers/policies/jwt-auth v1.1.0/go.mod h1:wLDwZ0793wAj2eRS1zzS/yxUf33810NmbKqV/vsfmbo=
